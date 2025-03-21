@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.10-slim
+FROM python:3.13-bookworm
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -8,8 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     vainfo \
-    i965-va-driver \
-    intel-media-va-driver-non-free \
+    intel-media-va-driver \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
