@@ -1,0 +1,13 @@
+services:
+  av1_encoder:
+    build: .
+    container_name: av1_encoder
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ./source:/app/source
+      - ./destination:/app/destination
+    environment:
+      - ENABLE_HW_ACCEL=true
+      - ENCODING_QUALITY=MEDIUM  # Options: LOW, MEDIUM, HIGH
+    restart: always
