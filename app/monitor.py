@@ -120,6 +120,12 @@ def encode_video(source_path):
         logging.info(f'File {dest_file} has already been processed.')
         return
 
+    # Check if the destination file already exists
+    if os.path.exists(dest_file):
+        logging.info(f'Encoded file already exists: {dest_file}')
+        processed_files.add(dest_file)
+        return
+
     logging.info(f'Starting encoding for {source_path}')
 
     codec, hwaccel_options, video_filter, extra_params = get_encoding_parameters()
@@ -163,10 +169,48 @@ def delete_encoded_video(source_path):
         processed_files.discard(encoded_file)
         logging.info(f'Deleted encoded video: {encoded_file}')
 
+def scan_source_directory():
+    """Scan the source directory for video files that need to be encoded."""
+    files_to_encode = []
+    for root, dirs, files in os.walk(SOURCE_FOLDER):
+        for file in files:
+            if is_video_file(file):
+                source_file = os.path.join(root, file)
+                # Determine the relative path and corresponding destination file
+                relative_path = os.path.relpath(source_file, SOURCE_FOLDER)
+                dest_path = os.path.join(DEST_FOLDER, relative_path)
+                dest_dir = os.path.dirname(dest_path)
+
+                # Change extension to .mkv
+                base_name = os.path.basename(dest_path)
+                source_name, _ = os.path.splitext(base_name)
+                dest_file = os.path.join(dest_dir, f"{source_name}.mkv")
+
+                # Check if the encoded file already exists
+                if not os.path.exists(dest_file):
+                    files_to_encode.append(source_file)
+                else:
+                    processed_files.add(dest_file)
+    return files_to_encode
+
 if __name__ == "__main__":
+    # Initial directory scan
+    logging.info('Starting initial scan of source directory...')
+    files_to_process = scan_source_directory()
+
+    if files_to_process:
+        logging.info(f'Found {len(files_to_process)} files to encode.')
+        for file_path in files_to_process:
+            logging.info(f'Processing file: {file_path}')
+            wait_for_file_completion(file_path)
+            encode_video(file_path)
+    else:
+        logging.info('No unencoded files found in the source directory.')
+
+    # Start monitoring for new files
     event_handler = VideoHandler()
     observer = Observer()
-    observer.schedule(event_handler, path=SOURCE_FOLDER, recursive=True)  # Set recursive to True
+    observer.schedule(event_handler, path=SOURCE_FOLDER, recursive=True)
     observer.start()
 
     logging.info('Monitoring started.')
