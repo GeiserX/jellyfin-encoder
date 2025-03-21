@@ -1,6 +1,7 @@
 import time
 import os
 import logging
+import subprocess
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -102,6 +103,27 @@ def get_encoding_parameters():
         video_filter = '"scale=-1:720"'
     return codec, hwaccel_options, video_filter, extra_params
 
+def verify_encoded_file(file_path):
+    """Verify that the encoded file is valid and complete."""
+    cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 'v', '-show_entries',
+        'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path
+    ]
+    try:
+        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        duration = float(output.strip())
+        if duration > 0:
+            return True
+        else:
+            logging.error(f'Encoded file has zero duration: {file_path}')
+            return False
+    except subprocess.CalledProcessError as e:
+        logging.error(f'ffprobe error for file {file_path}: {e.output.decode().strip()}')
+        return False
+    except Exception as e:
+        logging.error(f'Unexpected error while verifying file {file_path}: {str(e)}')
+        return False
+
 def encode_video(source_path):
     # Determine the relative path of the source file with respect to SOURCE_FOLDER
     relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
@@ -114,17 +136,27 @@ def encode_video(source_path):
     # Change extension to .mkv
     base_name = os.path.basename(dest_path)
     source_name, _ = os.path.splitext(base_name)
-    dest_file = os.path.join(dest_dir, f"{source_name}.mkv")
+    dest_file_final = os.path.join(dest_dir, f"{source_name}.mkv")
+    dest_file_temp = dest_file_final + ".tmp"  # Temporary file during encoding
 
-    if dest_file in processed_files:
-        logging.info(f'File {dest_file} has already been processed.')
+    if dest_file_final in processed_files:
+        logging.info(f'File {dest_file_final} has already been processed.')
         return
 
-    # Check if the destination file already exists
-    if os.path.exists(dest_file):
-        logging.info(f'Encoded file already exists: {dest_file}')
-        processed_files.add(dest_file)
-        return
+    # Check if the final encoded file already exists
+    if os.path.exists(dest_file_final):
+        if verify_encoded_file(dest_file_final):
+            logging.info(f'Encoded file already exists and is valid: {dest_file_final}')
+            processed_files.add(dest_file_final)
+            return
+        else:
+            logging.warning(f'Encoded file exists but is invalid, deleting: {dest_file_final}')
+            os.remove(dest_file_final)
+
+    # Remove any existing temp file
+    if os.path.exists(dest_file_temp):
+        logging.warning(f'Temporary file exists, deleting: {dest_file_temp}')
+        os.remove(dest_file_temp)
 
     logging.info(f'Starting encoding for {source_path}')
 
@@ -142,16 +174,27 @@ def encode_video(source_path):
         f'-map 0:v -map 0:a -map 0:s? '
         f'-c:a {audio_codec} -b:a {audio_bitrate} -ac {audio_channels} '
         f'-c:s copy '
-        f'"{dest_file}"'
+        f'"{dest_file_temp}"'
     )
 
     logging.info(f'Running command: {command}')
     exit_code = os.system(command)
     if exit_code == 0:
-        logging.info(f'Encoding completed: {dest_file}')
-        processed_files.add(dest_file)
+        logging.info(f'Encoding completed: {dest_file_temp}')
+        # Verify the encoded file
+        if verify_encoded_file(dest_file_temp):
+            # Rename temp file to final file
+            os.rename(dest_file_temp, dest_file_final)
+            logging.info(f'Encoded file moved to: {dest_file_final}')
+            processed_files.add(dest_file_final)
+        else:
+            logging.error(f'Encoded file is invalid, deleting: {dest_file_temp}')
+            os.remove(dest_file_temp)
     else:
         logging.error(f'Encoding failed for {source_path}')
+        # Remove temp file if it exists
+        if os.path.exists(dest_file_temp):
+            os.remove(dest_file_temp)
 
 def delete_encoded_video(source_path):
     # Determine the relative path of the source file with respect to SOURCE_FOLDER
@@ -163,11 +206,18 @@ def delete_encoded_video(source_path):
     base_name = os.path.basename(dest_path)
     source_name, _ = os.path.splitext(base_name)
     encoded_file = os.path.join(dest_dir, f"{source_name}.mkv")
+    temp_file = encoded_file + ".tmp"
 
+    # Remove the final encoded file if it exists
     if os.path.exists(encoded_file):
         os.remove(encoded_file)
         processed_files.discard(encoded_file)
         logging.info(f'Deleted encoded video: {encoded_file}')
+
+    # Remove the temporary encoded file if it exists
+    if os.path.exists(temp_file):
+        os.remove(temp_file)
+        logging.info(f'Deleted temporary encoded video: {temp_file}')
 
 def scan_source_directory():
     """Scan the source directory for video files that need to be encoded."""
@@ -184,13 +234,26 @@ def scan_source_directory():
                 # Change extension to .mkv
                 base_name = os.path.basename(dest_path)
                 source_name, _ = os.path.splitext(base_name)
-                dest_file = os.path.join(dest_dir, f"{source_name}.mkv")
+                dest_file_final = os.path.join(dest_dir, f"{source_name}.mkv")
+                dest_file_temp = dest_file_final + ".tmp"
 
-                # Check if the encoded file already exists
-                if not os.path.exists(dest_file):
+                # Check if the final encoded file exists and is valid
+                if os.path.exists(dest_file_final):
+                    if verify_encoded_file(dest_file_final):
+                        logging.info(f'Encoded file exists and is valid: {dest_file_final}')
+                        processed_files.add(dest_file_final)
+                        continue  # Skip to next file
+                    else:
+                        logging.warning(f'Encoded file is invalid, deleting: {dest_file_final}')
+                        os.remove(dest_file_final)
+                        files_to_encode.append(source_file)
+                elif os.path.exists(dest_file_temp):
+                    logging.warning(f'Temporary encoded file exists, deleting: {dest_file_temp}')
+                    os.remove(dest_file_temp)
                     files_to_encode.append(source_file)
                 else:
-                    processed_files.add(dest_file)
+                    # Encoded file does not exist
+                    files_to_encode.append(source_file)
     return files_to_encode
 
 if __name__ == "__main__":
