@@ -6,7 +6,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # Read environment variables
-ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
+ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'false').lower() == 'true'
 ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'MEDIUM').upper()
 
 SOURCE_FOLDER = '/app/source'
@@ -80,7 +80,7 @@ def wait_for_file_completion(filepath, timeout=TIMEOUT):
 def get_encoding_parameters():
     """Return encoding parameters based on ENCODING_QUALITY."""
     if ENABLE_HW_ACCEL:
-        # Hardware encoding
+        # Hardware encoding (assuming AV1 hardware encoding is supported)
         if ENCODING_QUALITY == 'HIGH':
             extra_params = '-b:v 0 -qp 20'
         elif ENCODING_QUALITY == 'LOW':
@@ -89,19 +89,55 @@ def get_encoding_parameters():
             extra_params = '-b:v 0 -qp 30'
         codec = 'av1_vaapi'
         hwaccel_options = '-hwaccel vaapi -vaapi_device /dev/dri/renderD128'
-        video_filter = '"format=nv12,hwupload,scale_vaapi=-1:720"'
+        video_filter = 'format=nv12,hwupload,scale_vaapi=-1:720'
     else:
-        # Software encoding
+        # Software encoding with multithreading
         if ENCODING_QUALITY == 'HIGH':
-            extra_params = '-crf 20 -b:v 0'
+            crf_value = 20
         elif ENCODING_QUALITY == 'LOW':
-            extra_params = '-crf 40 -b:v 0'
+            crf_value = 40
         else:  # MEDIUM or default
-            extra_params = '-crf 30 -b:v 0'
+            crf_value = 30
         codec = 'libaom-av1'
         hwaccel_options = ''
-        video_filter = '"scale=-1:720"'
+        video_filter = 'scale=-1:720'
+
+        # Additional multithreading options
+        cpu_count = os.cpu_count() or 1
+        threads = cpu_count  # Adjust as needed
+        tile_columns = calculate_tile_columns(cpu_count)
+        tile_rows = calculate_tile_rows(cpu_count)
+        cpu_used = 4  # Adjust for encoding speed vs. quality (0=best, 8=fastest)
+
+        extra_params = (
+            f'-crf {crf_value} -b:v 0 '
+            f'-cpu-used {cpu_used} '
+            f'-threads {threads} '
+            f'-tile-columns {tile_columns} '
+            f'-tile-rows {tile_rows} '
+            f'-row-mt 1 '
+        )
     return codec, hwaccel_options, video_filter, extra_params
+
+def calculate_tile_columns(cpu_count):
+    # Tile columns must be between 0 and 6 (2^0 to 2^6 tiles)
+    if cpu_count >= 16:
+        return 4  # 2^4 = 16 tile columns
+    elif cpu_count >= 8:
+        return 3  # 8 tile columns
+    elif cpu_count >= 4:
+        return 2  # 4 tile columns
+    elif cpu_count >= 2:
+        return 1  # 2 tile columns
+    else:
+        return 0  # 1 tile column
+
+def calculate_tile_rows(cpu_count):
+    # Tile rows must be between 0 and 2 (2^0 to 2^2 tiles)
+    if cpu_count >= 16:
+        return 2  # 2^2 = 4 tile rows
+    else:
+        return 1  # 2 tile rows
 
 def verify_encoded_file(file_path):
     """Verify that the encoded file is valid and complete."""
@@ -168,18 +204,44 @@ def encode_video(source_path):
     audio_channels = '2'
 
     # Build FFmpeg command
-    command = (
-        f'ffmpeg -y {hwaccel_options} -i "{source_path}" '
-        f'-vf {video_filter} -c:v {codec} {extra_params} '
-        f'-map 0:v -map 0:a -map 0:s? '
-        f'-c:a {audio_codec} -b:a {audio_bitrate} -ac {audio_channels} '
-        f'-c:s copy '
-        f'-f matroska '  # Explicitly specify the output format
-        f'"{dest_file_temp}"'
-    )
+    command = [
+        'ffmpeg', '-y'
+    ]
 
-    logging.info(f'Running command: {command}')
-    exit_code = os.system(command)
+    # Hardware acceleration options
+    if hwaccel_options:
+        command.extend(hwaccel_options.split())
+
+    command.extend([
+        '-i', source_path,
+        '-vf', video_filter,
+        '-c:v', codec
+    ])
+
+    # Add extra parameters
+    command.extend(extra_params.strip().split())
+
+    command.extend([
+        '-map', '0:v',
+        '-map', '0:a',
+        '-map', '0:s?',
+        '-c:a', audio_codec,
+        '-b:a', audio_bitrate,
+        '-ac', audio_channels,
+        '-c:s', 'copy',
+        '-f', 'matroska',
+        dest_file_temp
+    ])
+
+    logging.info(f'Running command: {" ".join(command)}')
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+
+    # Capture and log FFmpeg output
+    for line in process.stdout:
+        logging.info(line.strip())
+
+    exit_code = process.wait()
+
     if exit_code == 0:
         logging.info(f'Encoding completed: {dest_file_temp}')
         # Verify the encoded file
