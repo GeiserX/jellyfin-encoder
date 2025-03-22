@@ -174,6 +174,7 @@ def encode_video(source_path):
         f'-map 0:v -map 0:a -map 0:s? '
         f'-c:a {audio_codec} -b:a {audio_bitrate} -ac {audio_channels} '
         f'-c:s copy '
+        f'-f matroska '  # Explicitly specify the output format
         f'"{dest_file_temp}"'
     )
 
