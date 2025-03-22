@@ -1,6 +1,6 @@
 services:
   av1_encoder:
-    image: drumsergio/automatic-ffmpeg:0.0.2
+    image: drumsergio/automatic-ffmpeg:0.0.4
     container_name: av1_encoder
     devices:
       - /dev/dri:/dev/dri
