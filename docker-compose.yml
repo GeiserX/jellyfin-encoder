@@ -1,5 +1,5 @@
 services:
-  av1_encoder:
+  encoder:
     image: drumsergio/automatic-ffmpeg:0.0.9
     container_name: av1_encoder
     devices:
