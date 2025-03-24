@@ -12,8 +12,8 @@ ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
 HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()
 ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()
 
-SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'Z:\\Peliculas')
-DEST_FOLDER = os.getenv('DEST_FOLDER', 'U:\\Peliculas')
+SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'F:\\Peliculas')
+DEST_FOLDER = os.getenv('DEST_FOLDER', 'G:\\Peliculas')
 
 TIMEOUT = 86400
 MAX_SAME_SIZE_COUNT = 60
