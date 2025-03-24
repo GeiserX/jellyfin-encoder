@@ -1,6 +1,6 @@
 services:
   av1_encoder:
-    image: drumsergio/automatic-ffmpeg:0.0.4
+    image: drumsergio/automatic-ffmpeg:0.0.6
     container_name: av1_encoder
     devices:
       - /dev/dri:/dev/dri
@@ -8,6 +8,9 @@ services:
       - ./source:/app/source
       - ./destination:/app/destination
     environment:
-      - ENABLE_HW_ACCEL=false
-      - ENCODING_QUALITY=MEDIUM  # Options: LOW, MEDIUM, HIGH
+      - ENABLE_HW_ACCEL=true
+      - HW_ENCODING_TYPE=nvidia
+      - ENCODING_QUALITY=LOW  # Options: LOW, MEDIUM, HIGH
+      - SOURCE_FOLDER='/app/source'
+      - DEST_FOLDER='/app/destination'
     restart: always

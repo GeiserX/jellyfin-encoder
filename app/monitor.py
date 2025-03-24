@@ -7,391 +7,175 @@ from multiprocessing import Manager, freeze_support
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# Read environment variables
-ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'false').lower() == 'true'
-ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'MEDIUM').upper()
+# Env variables
+ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
+HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()
+ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()
 
-SOURCE_FOLDER = '/app/source'
-DEST_FOLDER = '/app/destination'
+SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'Z:\\Peliculas')
+DEST_FOLDER = os.getenv('DEST_FOLDER', 'U:\\Peliculas')
 
-# Adjust timeout and max_same_size_count
-TIMEOUT = 86400  # 24 hours
-MAX_SAME_SIZE_COUNT = 60  # Checks every second
+TIMEOUT = 86400
+MAX_SAME_SIZE_COUNT = 60
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Initialize the Manager
-manager = Manager()
-processed_files = manager.dict()
-processing_files = manager.dict()
-
-executor = None  # Will be initialized in main
-
 
 class VideoHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory:
             return
-
-        filename = event.src_path
-        if is_video_file(filename):
-            logging.info(f'New video file detected: {filename}')
-            submit_encoding_task(filename)
+        if is_video_file(event.src_path):
+            logging.info(f'New video file detected: {event.src_path}')
+            submit_encoding_task(event.src_path)
 
     def on_deleted(self, event):
         if event.is_directory:
             return
-
-        filename = event.src_path
-        if is_video_file(filename):
-            logging.info(f'Video file deleted: {filename}')
-            delete_encoded_video(filename)
-
+        if is_video_file(event.src_path):
+            logging.info(f'Video file deleted: {event.src_path}')
+            delete_encoded_video(event.src_path)
 
 def is_video_file(filename):
-    video_extensions = (
-        '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm', '.iso'
-    )
-    return filename.lower().endswith(video_extensions)
-
+    vid_ext = ('.mp4','.mkv','.avi','.mov','.wmv','.flv','.mpeg','.mpg','.webm')
+    return filename.lower().endswith(vid_ext)
 
 def wait_for_file_completion(filepath, timeout=TIMEOUT):
-    """Wait until the file is fully written."""
-    last_size = -1
-    same_size_count = 0
-
-    start_time = time.time()
-
+    last_size, same_size_count = -1, 0
+    start = time.time()
     while True:
         try:
-            current_size = os.path.getsize(filepath)
+            curr_size = os.path.getsize(filepath)
+            same_size_count = same_size_count + 1 if curr_size == last_size else 0
+            if same_size_count >= MAX_SAME_SIZE_COUNT:
+                return True
+            if time.time() - start > timeout:
+                logging.warning(f'Timeout waiting for: {filepath}')
+                return False
+            last_size = curr_size
+            time.sleep(1)
         except FileNotFoundError:
-            # File was removed before we could process it
-            logging.info(f'File not found: {filepath}')
+            logging.info(f'File removed: {filepath}')
             return False
-
-        if current_size == last_size:
-            same_size_count += 1
-        else:
-            same_size_count = 0
-
-        if same_size_count >= MAX_SAME_SIZE_COUNT:
-            # Assume file is fully written
-            return True
-
-        if time.time() - start_time > timeout:
-            logging.warning(f'Timeout while waiting for file to complete: {filepath}')
-            return False
-
-        last_size = current_size
-        time.sleep(1)
-
-
-def get_encoding_parameters():
-    """Return encoding parameters based on ENCODING_QUALITY."""
-    if ENABLE_HW_ACCEL:
-        # Hardware encoding (assuming AV1 hardware encoding is supported)
-        if ENCODING_QUALITY == 'HIGH':
-            extra_params = '-b:v 0 -qp 20'
-        elif ENCODING_QUALITY == 'LOW':
-            extra_params = '-b:v 0 -qp 40'
-        else:  # MEDIUM or default
-            extra_params = '-b:v 0 -qp 30'
-        codec = 'av1_vaapi'
-        hwaccel_options = '-hwaccel vaapi -vaapi_device /dev/dri/renderD128'
-        video_filter = 'format=nv12,hwupload,scale_vaapi=-1:720'
-    else:
-        # Software encoding with multithreading
-        if ENCODING_QUALITY == 'HIGH':
-            crf_value = 20
-        elif ENCODING_QUALITY == 'LOW':
-            crf_value = 40
-        else:  # MEDIUM or default
-            crf_value = 30
-        codec = 'libaom-av1'
-        hwaccel_options = ''
-        video_filter = 'scale=-1:720'
-
-        # Additional multithreading options
-        cpu_count = os.cpu_count() or 1
-        threads = cpu_count  # Adjust as needed
-        tile_columns = calculate_tile_columns(cpu_count)
-        tile_rows = calculate_tile_rows(cpu_count)
-        cpu_used = 4  # Adjust for encoding speed vs. quality (0=best, 8=fastest)
-
-        extra_params = (
-            f'-crf {crf_value} -b:v 0 '
-            f'-cpu-used {cpu_used} '
-            f'-threads {threads} '
-            f'-tile-columns {tile_columns} '
-            f'-tile-rows {tile_rows} '
-            f'-row-mt 1 '
-        )
-    return codec, hwaccel_options, video_filter, extra_params
-
-
-def calculate_tile_columns(cpu_count):
-    # Tile columns must be between 0 and 6 (2^0 to 2^6 tiles)
-    if cpu_count >= 16:
-        return 4  # 2^4 = 16 tile columns
-    elif cpu_count >= 8:
-        return 3  # 8 tile columns
-    elif cpu_count >= 4:
-        return 2  # 4 tile columns
-    elif cpu_count >= 2:
-        return 1  # 2 tile columns
-    else:
-        return 0  # 1 tile column
-
-
-def calculate_tile_rows(cpu_count):
-    # Tile rows must be between 0 and 2 (2^0 to 2^2 tiles)
-    if cpu_count >= 16:
-        return 2  # 2^2 = 4 tile rows
-    else:
-        return 1  # 2 tile rows
-
 
 def verify_encoded_file(file_path):
-    """Verify that the encoded file is valid and complete."""
-    cmd = [
-        'ffprobe', '-v', 'error', '-select_streams', 'v', '-show_entries',
-        'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path
-    ]
+    cmd = ['ffprobe','-v','error','-select_streams','v','-show_entries','format=duration',
+           '-of','default=noprint_wrappers=1:nokey=1', file_path]
     try:
         output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         duration = float(output.strip())
-        if duration > 0:
-            return True
-        else:
-            logging.error(f'Encoded file has zero duration: {file_path}')
-            return False
-    except subprocess.CalledProcessError as e:
-        logging.error(f'ffprobe error for file {file_path}: {e.output.decode().strip()}')
-        return False
+        return duration > 0
     except Exception as e:
-        logging.error(f'Unexpected error while verifying file {file_path}: {str(e)}')
+        logging.error(f'File verification error {file_path}: {e}')
         return False
 
-
-def encode_video(source_path):
-    # Check if the file is already being processed
+def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
-        logging.info(f'File is already being processed: {source_path}')
+        logging.info(f'Already processing: {source_path}')
         return
-
-    # Mark file as being processed
     processing_files[source_path] = True
 
     try:
-        # Determine the relative path of the source file with respect to SOURCE_FOLDER
         relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
         dest_path = os.path.join(DEST_FOLDER, relative_path)
         dest_dir = os.path.dirname(dest_path)
-
-        # Ensure the destination directory exists
         os.makedirs(dest_dir, exist_ok=True)
 
-        # Change extension to .mkv
         base_name = os.path.basename(dest_path)
         source_name, _ = os.path.splitext(base_name)
         dest_file_final = os.path.join(dest_dir, f"{source_name}.mkv")
-        dest_file_temp = dest_file_final + ".tmp"  # Temporary file during encoding
+        dest_file_temp = dest_file_final + ".tmp"
 
         if processed_files.get(dest_file_final):
-            logging.info(f'File {dest_file_final} has already been processed.')
+            logging.info(f'Already processed: {dest_file_final}')
             return
 
-        # Check if the final encoded file already exists
-        if os.path.exists(dest_file_final):
-            if verify_encoded_file(dest_file_final):
-                logging.info(f'Encoded file already exists and is valid: {dest_file_final}')
-                processed_files[dest_file_final] = True
-                return
-            else:
-                logging.warning(f'Encoded file exists but is invalid, deleting: {dest_file_final}')
-                os.remove(dest_file_final)
-
-        # Remove any existing temp file
+        if os.path.exists(dest_file_final) and verify_encoded_file(dest_file_final):
+            logging.info(f'Valid encoded file exists: {dest_file_final}')
+            processed_files[dest_file_final] = True
+            return
+        elif os.path.exists(dest_file_final):
+            os.remove(dest_file_final)
         if os.path.exists(dest_file_temp):
-            logging.warning(f'Temporary file exists, deleting: {dest_file_temp}')
             os.remove(dest_file_temp)
 
-        # Wait for file completion
         if not wait_for_file_completion(source_path):
-            logging.warning(f'File not ready for processing: {source_path}')
             return
 
-        logging.info(f'Starting encoding for {source_path}')
-
-        codec, hwaccel_options, video_filter, extra_params = get_encoding_parameters()
-
-        # Audio encoding parameters
-        audio_codec = 'libopus'
-        audio_bitrate = '128k'
-        audio_channels = '2'
-
-        # Build FFmpeg command
+        # Use exactly the cmd batch approach that previously worked:
         command = [
-            'ffmpeg', '-y'
-        ]
-
-        # Hardware acceleration options
-        if hwaccel_options:
-            command.extend(hwaccel_options.split())
-
-        command.extend([
+            'ffmpeg', '-y',
             '-i', source_path,
-            '-vf', video_filter,
-            '-c:v', codec
-        ])
-
-        # Add extra parameters
-        command.extend(extra_params.strip().split())
-
-        command.extend([
-            '-map', '0:v',
-            '-map', '0:a',
-            '-map', '0:s?',
-            '-c:a', audio_codec,
-            '-b:a', audio_bitrate,
-            '-ac', audio_channels,
+            '-map', '0:v', '-map', '0:a', '-map', '0:s?',
+            '-vf', 'scale=-1:720',
+            '-c:v', 'av1_nvenc', '-cq', '40', '-preset', 'medium',
+            '-c:a', 'libopus', '-b:a', '128k', '-ac', '2',
             '-c:s', 'copy',
             '-f', 'matroska',
             dest_file_temp
-        ])
+        ]
 
-        logging.info(f'Running command: {" ".join(command)}')
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
-
-        # Capture and log FFmpeg output
+        logging.info(f'FFmpeg command: {" ".join(command)}')
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in process.stdout:
             logging.info(line.strip())
-
-        exit_code = process.wait()
-
-        if exit_code == 0:
-            logging.info(f'Encoding completed: {dest_file_temp}')
-            # Verify the encoded file
+        if process.wait() == 0:
             if verify_encoded_file(dest_file_temp):
-                # Rename temp file to final file
                 os.rename(dest_file_temp, dest_file_final)
-                logging.info(f'Encoded file moved to: {dest_file_final}')
                 processed_files[dest_file_final] = True
             else:
-                logging.error(f'Encoded file is invalid, deleting: {dest_file_temp}')
+                logging.error('Verification failed, deleting temp file.')
                 os.remove(dest_file_temp)
         else:
-            logging.error(f'Encoding failed for {source_path}')
-            # Remove temp file if it exists
+            logging.error('FFmpeg error occurred, removing temp file.')
             if os.path.exists(dest_file_temp):
                 os.remove(dest_file_temp)
     finally:
-        # Remove from processing_files
         processing_files.pop(source_path, None)
 
-
 def delete_encoded_video(source_path):
-    # Determine the relative path of the source file with respect to SOURCE_FOLDER
     relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
     dest_path = os.path.join(DEST_FOLDER, relative_path)
     dest_dir = os.path.dirname(dest_path)
-
-    # Change extension to .mkv
-    base_name = os.path.basename(dest_path)
-    source_name, _ = os.path.splitext(base_name)
+    source_name, _ = os.path.splitext(os.path.basename(dest_path))
     encoded_file = os.path.join(dest_dir, f"{source_name}.mkv")
     temp_file = encoded_file + ".tmp"
-
-    # Remove the final encoded file if it exists
-    if os.path.exists(encoded_file):
-        os.remove(encoded_file)
-        processed_files.pop(encoded_file, None)
-        logging.info(f'Deleted encoded video: {encoded_file}')
-
-    # Remove the temporary encoded file if it exists
-    if os.path.exists(temp_file):
-        os.remove(temp_file)
-        logging.info(f'Deleted temporary encoded video: {temp_file}')
-
+    for f in [encoded_file, temp_file]:
+        if os.path.exists(f):
+            os.remove(f)
+            logging.info(f'Deleted: {f}')
 
 def scan_source_directory():
-    """Scan the source directory for video files that need to be encoded."""
-    files_to_encode = []
-    for root, dirs, files in os.walk(SOURCE_FOLDER):
-        for file in files:
+    files = []
+    for root, _, filenames in os.walk(SOURCE_FOLDER):
+        for file in filenames:
             if is_video_file(file):
-                source_file = os.path.join(root, file)
-                # Determine the relative path and corresponding destination file
-                relative_path = os.path.relpath(source_file, SOURCE_FOLDER)
-                dest_path = os.path.join(DEST_FOLDER, relative_path)
-                dest_dir = os.path.dirname(dest_path)
-
-                # Change extension to .mkv
-                base_name = os.path.basename(dest_path)
-                source_name, _ = os.path.splitext(base_name)
-                dest_file_final = os.path.join(dest_dir, f"{source_name}.mkv")
-                dest_file_temp = dest_file_final + ".tmp"
-
-                # Check if the final encoded file exists and is valid
-                if os.path.exists(dest_file_final):
-                    if verify_encoded_file(dest_file_final):
-                        logging.info(f'Encoded file exists and is valid: {dest_file_final}')
-                        processed_files[dest_file_final] = True
-                        continue  # Skip to next file
-                    else:
-                        logging.warning(f'Encoded file is invalid, deleting: {dest_file_final}')
-                        os.remove(dest_file_final)
-                        files_to_encode.append(source_file)
-                elif os.path.exists(dest_file_temp):
-                    logging.warning(f'Temporary encoded file exists, deleting: {dest_file_temp}')
-                    os.remove(dest_file_temp)
-                    files_to_encode.append(source_file)
-                else:
-                    # Encoded file does not exist
-                    files_to_encode.append(source_file)
-    return files_to_encode
-
+                files.append(os.path.join(root, file))
+    return files
 
 def submit_encoding_task(file_path):
-    if not executor:
-        logging.error('Executor not initialized.')
-        return
-
-    future = executor.submit(encode_video, file_path)
-    # Optionally, store futures if you want to track them
-    # futures.append(future)
-
+    executor.submit(encode_video, file_path, processed_files, processing_files)
 
 if __name__ == "__main__":
-    # Initialize the executor
-    max_workers = os.cpu_count() or 1
+    freeze_support()
+    manager = Manager()
+    processed_files, processing_files = manager.dict(), manager.dict()
+    max_workers = 1 if ENABLE_HW_ACCEL else (os.cpu_count() or 1)
+    logging.info(f'Running with {max_workers} workers')
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
 
-    # Start monitoring for new files
     event_handler = VideoHandler()
     observer = Observer()
     observer.schedule(event_handler, path=SOURCE_FOLDER, recursive=True)
     observer.start()
 
     logging.info('Monitoring started.')
-
-    # Initial directory scan
-    logging.info('Starting initial scan of source directory...')
-    files_to_process = scan_source_directory()
-
-    if files_to_process:
-        logging.info(f'Found {len(files_to_process)} files to encode.')
-        for file_path in files_to_process:
-            submit_encoding_task(file_path)
-    else:
-        logging.info('No unencoded files found in the source directory.')
+    for file_path in scan_source_directory():
+        submit_encoding_task(file_path)
 
     try:
         while True:
-            time.sleep(1)  # Keep the main thread alive
+            time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()
-    finally:
-        observer.join()
-        executor.shutdown(wait=True)
+    observer.join()
+    executor.shutdown(wait=True)

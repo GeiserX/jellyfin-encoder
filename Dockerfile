@@ -20,7 +20,7 @@ RUN python3 -m venv venv
 RUN . /app/venv/bin/activate && pip install --upgrade pip
 
 # Copy requirements.txt first to leverage Docker cache
-COPY requirements.txt ./
+COPY app/requirements.txt ./
 
 # Install Python dependencies in the virtual environment
 RUN . /app/venv/bin/activate && pip install --no-cache-dir -r requirements.txt
