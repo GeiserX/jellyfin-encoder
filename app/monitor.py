@@ -9,8 +9,9 @@ from watchdog.events import FileSystemEventHandler
 
 # Env variables
 ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
-HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()
-ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()
+HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower() # nvidia, intel
+ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper() # LOW, MED
+ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower() # hevc or av1
 
 SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'F:\\Peliculas')
 DEST_FOLDER = os.getenv('DEST_FOLDER', 'G:\\Peliculas')
@@ -101,32 +102,76 @@ def encode_video(source_path, processed_files, processing_files):
         if not wait_for_file_completion(source_path):
             return
 
-        # Use exactly the cmd batch approach that previously worked:
-        command = [
-            'ffmpeg', '-y',
-            '-i', source_path,
-            '-map', '0:v', '-map', '0:a', '-map', '0:s?',
-            '-vf', 'scale=-1:720',
-            '-c:v', 'av1_nvenc', '-cq', '40', '-preset', 'medium',
-            '-c:a', 'libopus', '-b:a', '128k', '-ac', '2',
-            '-c:s', 'copy',
-            '-f', 'matroska',
-            dest_file_temp
-        ]
+        quality_settings = {
+            'LOW': {'cq': {'av1': 45, 'hevc': 32}, 'crf': {'av1': 40, 'hevc': 30}},
+            'MEDIUM': {'cq': {'av1': 35, 'hevc': 26}, 'crf': {'av1': 35, 'hevc': 26}},
+            'HIGH': {'cq': {'av1': 28, 'hevc': 22}, 'crf': {'av1': 28, 'hevc': 22}},
+        }
+
+        quality = quality_settings.get(ENCODING_QUALITY, quality_settings['LOW'])
+
+        hw_enc_supported = True
+        video_encoder = []
+
+        if ENABLE_HW_ACCEL:
+            if HW_ENCODING_TYPE == 'nvidia':
+                if ENCODING_CODEC == 'av1':
+                    video_encoder = ['-c:v', 'av1_nvenc', '-preset', 'medium', '-cq', str(quality['cq']['av1'])]
+                elif ENCODING_CODEC == 'hevc':
+                    video_encoder = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr_hq', '-cq', str(quality['cq']['hevc']), '-b:v', '0']
+                else:
+                    logging.warning(f'NVIDIA encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
+                    video_encoder = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr_hq', '-cq', str(quality['cq']['hevc']), '-b:v', '0']
+
+            elif HW_ENCODING_TYPE == 'intel':
+                if ENCODING_CODEC == 'av1':
+                    video_encoder = ['-c:v', 'av1_qsv', '-preset', 'medium', '-global_quality', str(quality['cq']['av1'])]
+                elif ENCODING_CODEC == 'hevc':
+                    video_encoder = ['-c:v', 'hevc_qsv', '-preset', 'medium', '-global_quality', str(quality['cq']['hevc'])]
+                else:
+                    logging.warning(f'Intel encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
+                    video_encoder = ['-c:v', 'hevc_qsv', '-preset', 'medium', '-global_quality', str(quality['cq']['hevc'])]
+            else:
+                logging.error(f'Unsupported hardware acceleration "{HW_ENCODING_TYPE}". Falling back to software encoding.')
+                hw_enc_supported = False
+        else:
+            hw_enc_supported = False
+
+        if not hw_enc_supported:
+            # Software Encoding fallback
+            if ENCODING_CODEC == 'av1':
+                video_encoder = ['-c:v', 'libsvtav1', '-preset', '6', '-crf', str(quality['crf']['av1']), '-cpu-used','4']
+            elif ENCODING_CODEC == 'hevc':
+                video_encoder = ['-c:v', 'libx265', '-preset', 'medium', '-crf', str(quality['crf']['hevc'])]
+            else:
+                logging.warning(f'Software encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
+                video_encoder = ['-c:v', 'libx265', '-preset', 'medium', '-crf', str(quality['crf']['hevc'])]
+
+        command = ['ffmpeg', '-y', '-i', source_path,
+                   '-map', '0:v', '-map', '0:a', '-map', '0:s?',
+                   '-vf', 'scale=-1:720'] + video_encoder + [
+                   '-c:a', 'libopus', '-b:a', '128k', '-ac', '2',
+                   '-c:s', 'copy',
+                   '-f', 'matroska',
+                   dest_file_temp
+                  ]
 
         logging.info(f'FFmpeg command: {" ".join(command)}')
+
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in process.stdout:
             logging.info(line.strip())
+
         if process.wait() == 0:
             if verify_encoded_file(dest_file_temp):
                 os.rename(dest_file_temp, dest_file_final)
                 processed_files[dest_file_final] = True
+                logging.info(f'Encoding succeeded: {dest_file_final}')
             else:
-                logging.error('Verification failed, deleting temp file.')
+                logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
                 os.remove(dest_file_temp)
         else:
-            logging.error('FFmpeg error occurred, removing temp file.')
+            logging.error(f'FFmpeg encoding failed for file: {source_path}')
             if os.path.exists(dest_file_temp):
                 os.remove(dest_file_temp)
     finally:

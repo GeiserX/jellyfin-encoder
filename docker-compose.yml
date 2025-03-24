@@ -13,6 +13,7 @@ services:
       ENCODING_QUALITY: "LOW"
       SOURCE_FOLDER: "/app/source"
       DEST_FOLDER: "/app/destination"
+      ENCODING_CODEC: "av1"
     restart: always
     deploy:
       resources:
