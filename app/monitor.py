@@ -147,14 +147,16 @@ def encode_video(source_path, processed_files, processing_files):
                 logging.warning(f'Software encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
                 video_encoder = ['-c:v', 'libx265', '-preset', 'medium', '-crf', str(quality['crf']['hevc'])]
 
-        command = ['ffmpeg', '-y', '-i', source_path,
-                   '-map', '0:v', '-map', '0:a', '-map', '0:s?',
-                   '-vf', 'scale=-1:720'] + video_encoder + [
-                   '-c:a', 'libopus', '-b:a', '128k', '-ac', '2',
-                   '-c:s', 'copy',
-                   '-f', 'matroska',
-                   dest_file_temp
-                  ]
+        command = [
+            'ffmpeg', '-y', '-i', source_path,
+            '-map', '0:v', '-map', '0:a', '-map', '0:s?',
+            '-vf', 'scale=-1:720'
+        ] + video_encoder + [
+            '-c:a', 'libopus', '-b:a', '128k', '-vbr', 'on', '-ac', '2',
+            '-c:s', 'copy',
+            '-f', 'matroska',
+            dest_file_temp
+        ]
 
         logging.info(f'FFmpeg command: {" ".join(command)}')
 
