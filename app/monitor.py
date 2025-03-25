@@ -6,12 +6,13 @@ import concurrent.futures
 from multiprocessing import Manager, freeze_support
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import json  # Added import for json module
 
 # Env variables
 ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
-HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower() # nvidia, intel
-ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper() # LOW, MED
-ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower() # hevc or av1
+HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()  # nvidia, intel
+ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()  # LOW, MEDIUM, HIGH
+ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'av1').lower()  # hevc or av1
 
 SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'F:\\Peliculas')
 DEST_FOLDER = os.getenv('DEST_FOLDER', 'G:\\Peliculas')
@@ -20,6 +21,7 @@ TIMEOUT = 86400
 MAX_SAME_SIZE_COUNT = 60
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 class VideoHandler(FileSystemEventHandler):
     def on_created(self, event):
@@ -36,9 +38,11 @@ class VideoHandler(FileSystemEventHandler):
             logging.info(f'Video file deleted: {event.src_path}')
             delete_encoded_video(event.src_path)
 
+
 def is_video_file(filename):
-    vid_ext = ('.mp4','.mkv','.avi','.mov','.wmv','.flv','.mpeg','.mpg','.webm')
+    vid_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm')
     return filename.lower().endswith(vid_ext)
+
 
 def wait_for_file_completion(filepath, timeout=TIMEOUT):
     last_size, same_size_count = -1, 0
@@ -58,9 +62,18 @@ def wait_for_file_completion(filepath, timeout=TIMEOUT):
             logging.info(f'File removed: {filepath}')
             return False
 
+def is_file_growing(file_path, check_interval=10):
+    size1 = os.path.getsize(file_path)
+    time.sleep(check_interval)
+    if not os.path.exists(file_path):
+        # File has been deleted in the meantime
+        return False
+    size2 = os.path.getsize(file_path)
+    return size2 > size1
+
 def verify_encoded_file(file_path):
-    cmd = ['ffprobe','-v','error','-select_streams','v','-show_entries','format=duration',
-           '-of','default=noprint_wrappers=1:nokey=1', file_path]
+    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v', '-show_entries', 'format=duration',
+           '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
     try:
         output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         duration = float(output.strip())
@@ -68,6 +81,20 @@ def verify_encoded_file(file_path):
     except Exception as e:
         logging.error(f'File verification error {file_path}: {e}')
         return False
+
+
+def get_audio_streams(source_path):
+    ffprobe_cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 'a',
+        '-show_entries', 'stream=index,codec_name', '-of', 'json', source_path
+    ]
+    ffprobe_process = subprocess.run(ffprobe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if ffprobe_process.returncode != 0:
+        logging.error(f'ffprobe failed for file: {source_path}')
+        return []
+    stream_info = json.loads(ffprobe_process.stdout)
+    return stream_info.get('streams', [])
+
 
 def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
@@ -85,6 +112,15 @@ def encode_video(source_path, processed_files, processing_files):
         source_name, _ = os.path.splitext(base_name)
         dest_file_final = os.path.join(dest_dir, f"{source_name}.mkv")
         dest_file_temp = dest_file_final + ".tmp"
+
+        if os.path.exists(dest_file_temp):
+            if is_file_growing(dest_file_temp):
+                logging.info(f'Temp file {dest_file_temp} is currently growing; skipping deletion.')
+                # Skip processing this file
+                return
+            else:
+                logging.info(f'Deleting temp file: {dest_file_temp}')
+                os.remove(dest_file_temp)
 
         if processed_files.get(dest_file_final):
             logging.info(f'Already processed: {dest_file_final}')
@@ -116,21 +152,27 @@ def encode_video(source_path, processed_files, processing_files):
         if ENABLE_HW_ACCEL:
             if HW_ENCODING_TYPE == 'nvidia':
                 if ENCODING_CODEC == 'av1':
-                    video_encoder = ['-c:v', 'av1_nvenc', '-preset', 'medium', '-cq', str(quality['cq']['av1'])]
+                    video_encoder = ['-c:v', 'av1_nvenc', '-preset', 'medium',
+                                     '-cq', str(quality['cq']['av1'])]
                 elif ENCODING_CODEC == 'hevc':
-                    video_encoder = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr_hq', '-cq', str(quality['cq']['hevc']), '-b:v', '0']
+                    video_encoder = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr_hq',
+                                     '-cq', str(quality['cq']['hevc']), '-b:v', '0']
                 else:
                     logging.warning(f'NVIDIA encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
-                    video_encoder = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr_hq', '-cq', str(quality['cq']['hevc']), '-b:v', '0']
+                    video_encoder = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr_hq',
+                                     '-cq', str(quality['cq']['hevc']), '-b:v', '0']
 
             elif HW_ENCODING_TYPE == 'intel':
                 if ENCODING_CODEC == 'av1':
-                    video_encoder = ['-c:v', 'av1_qsv', '-preset', 'medium', '-global_quality', str(quality['cq']['av1'])]
+                    video_encoder = ['-c:v', 'av1_qsv', '-preset', 'medium',
+                                     '-global_quality', str(quality['cq']['av1'])]
                 elif ENCODING_CODEC == 'hevc':
-                    video_encoder = ['-c:v', 'hevc_qsv', '-preset', 'medium', '-global_quality', str(quality['cq']['hevc'])]
+                    video_encoder = ['-c:v', 'hevc_qsv', '-preset', 'medium',
+                                     '-global_quality', str(quality['cq']['hevc'])]
                 else:
                     logging.warning(f'Intel encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
-                    video_encoder = ['-c:v', 'hevc_qsv', '-preset', 'medium', '-global_quality', str(quality['cq']['hevc'])]
+                    video_encoder = ['-c:v', 'hevc_qsv', '-preset', 'medium',
+                                     '-global_quality', str(quality['cq']['hevc'])]
             else:
                 logging.error(f'Unsupported hardware acceleration "{HW_ENCODING_TYPE}". Falling back to software encoding.')
                 hw_enc_supported = False
@@ -140,26 +182,46 @@ def encode_video(source_path, processed_files, processing_files):
         if not hw_enc_supported:
             # Software Encoding fallback
             if ENCODING_CODEC == 'av1':
-                video_encoder = ['-c:v', 'libsvtav1', '-preset', '6', '-crf', str(quality['crf']['av1']), '-cpu-used','4']
+                video_encoder = ['-c:v', 'libsvtav1', '-preset', '6', '-crf',
+                                 str(quality['crf']['av1']), '-cpu-used', '4']
             elif ENCODING_CODEC == 'hevc':
-                video_encoder = ['-c:v', 'libx265', '-preset', 'medium', '-crf', str(quality['crf']['hevc'])]
+                video_encoder = ['-c:v', 'libx265', '-preset', 'medium', '-crf',
+                                 str(quality['crf']['hevc'])]
             else:
                 logging.warning(f'Software encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
-                video_encoder = ['-c:v', 'libx265', '-preset', 'medium', '-crf', str(quality['crf']['hevc'])]
+                video_encoder = ['-c:v', 'libx265', '-preset', 'medium', '-crf',
+                                 str(quality['crf']['hevc'])]
 
+        # Analyze audio streams with ffprobe
+        audio_streams = get_audio_streams(source_path)
+        if not audio_streams:
+            logging.error(f'No audio streams found in file: {source_path}')
+            return
+
+        # Build the FFmpeg command
         command = [
-            'ffmpeg', '-y', '-i', source_path,
-            '-map', '0:v', '-map', '0:a', '-map', '0:s?',
+            'ffmpeg', '-loglevel', 'verbose', '-y', '-i', source_path,
+            '-map', '0:v',
             '-vf', 'scale=-1:720'
-        ] + video_encoder + [
-            '-c:a', 'libopus', '-b:a', '128k', '-vbr', 'on', '-ac', '2',
-            '-c:s', 'copy',
-            '-f', 'matroska',
-            dest_file_temp
-        ]
+        ] + video_encoder
+
+        # Process each audio stream
+        for idx, stream in enumerate(audio_streams):
+            codec_name = stream['codec_name']
+            # Map the audio stream
+            command.extend(['-map', f'0:a:{idx}'])
+            # Re-encode all audio streams to AC3, downmixed to stereo
+            command.extend([f'-c:a:{idx}', 'ac3', f'-b:a:{idx}', '192k', f'-ac:a:{idx}', '2'])
+
+        # Map subtitles
+        command.extend(['-map', '0:s?', '-c:s', 'copy'])
+
+        # Set output format and destination file
+        command.extend(['-f', 'matroska', dest_file_temp])
 
         logging.info(f'FFmpeg command: {" ".join(command)}')
 
+        # Run FFmpeg command
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in process.stdout:
             logging.info(line.strip())
@@ -191,6 +253,7 @@ def delete_encoded_video(source_path):
             os.remove(f)
             logging.info(f'Deleted: {f}')
 
+
 def scan_source_directory():
     files = []
     for root, _, filenames in os.walk(SOURCE_FOLDER):
@@ -199,8 +262,10 @@ def scan_source_directory():
                 files.append(os.path.join(root, file))
     return files
 
+
 def submit_encoding_task(file_path):
     executor.submit(encode_video, file_path, processed_files, processing_files)
+
 
 if __name__ == "__main__":
     freeze_support()
