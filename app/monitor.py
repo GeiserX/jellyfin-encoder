@@ -12,7 +12,7 @@ import json  # Added import for json module
 ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
 HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()  # nvidia, intel
 ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()  # LOW, MEDIUM, HIGH
-ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'av1').lower()  # hevc or av1
+ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower()  # hevc or av1
 
 SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'F:\\Peliculas')
 DEST_FOLDER = os.getenv('DEST_FOLDER', 'G:\\Peliculas')
@@ -95,6 +95,21 @@ def get_audio_streams(source_path):
     stream_info = json.loads(ffprobe_process.stdout)
     return stream_info.get('streams', [])
 
+# Helper function to safely find subtitle streams
+def get_subtitle_streams(source_path):
+    ffprobe_cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 's',
+        '-show_entries', 'stream=index,codec_name', '-of', 'json', source_path
+    ]
+    ffprobe_process = subprocess.run(ffprobe_cmd, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+    if ffprobe_process.returncode != 0:
+        logging.error(f'ffprobe failed subtitle check for file: {source_path}')
+        return []
+    stream_info = json.loads(ffprobe_process.stdout)
+    safe_subtitle_codecs = ['ass', 'srt', 'subrip', 'mov_text', 'hdmv_pgs_subtitle']
+    return [stream['index'] for stream in stream_info.get('streams', [])
+            if stream['codec_name'] in safe_subtitle_codecs]
 
 def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
@@ -200,7 +215,9 @@ def encode_video(source_path, processed_files, processing_files):
 
         # Build the FFmpeg command
         command = [
-            'ffmpeg', '-loglevel', 'verbose', '-y', '-i', source_path,
+            'ffmpeg', '-loglevel', 'verbose', '-y',
+            '-analyzeduration', '100M', '-probesize', '100M',
+            '-i', source_path,
             '-map', '0:v',
             '-vf', 'scale=-1:720'
         ] + video_encoder
