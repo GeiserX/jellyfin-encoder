@@ -1,6 +1,7 @@
 import time
 import os
 import logging
+
 import subprocess
 import concurrent.futures
 from multiprocessing import Manager, freeze_support
@@ -14,8 +15,8 @@ HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()  # nvidia, in
 ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()  # LOW, MEDIUM, HIGH
 ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower()  # hevc or av1
 
-SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'F:\\Peliculas')
-DEST_FOLDER = os.getenv('DEST_FOLDER', 'G:\\Peliculas')
+SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'F:\\Series')
+DEST_FOLDER = os.getenv('DEST_FOLDER', 'G:\\Series')
 
 TIMEOUT = 86400
 MAX_SAME_SIZE_COUNT = 60
@@ -218,7 +219,7 @@ def encode_video(source_path, processed_files, processing_files):
             'ffmpeg', '-loglevel', 'verbose', '-y',
             '-analyzeduration', '100M', '-probesize', '100M',
             '-i', source_path,
-            '-map', '0:v',
+            '-map', '0:v:0',
             '-vf', 'scale=-1:720'
         ] + video_encoder
 
@@ -283,6 +284,53 @@ def scan_source_directory():
 def submit_encoding_task(file_path):
     executor.submit(encode_video, file_path, processed_files, processing_files)
 
+def cleanup_destination():
+    """
+    Remove files in DEST_FOLDER that no longer have a
+    counterpart in SOURCE_FOLDER.
+
+    Safety rails:
+        • SOURCE_FOLDER must exist.
+        • SOURCE_FOLDER must contain ≥1 video file.
+        • .tmp files are deleted only if they are NOT growing.
+    """
+    if not os.path.isdir(SOURCE_FOLDER):
+        logging.error(f'Source folder "{SOURCE_FOLDER}" not accessible – '
+                      'abort clean-up.')
+        return
+
+    source_rel = {os.path.relpath(p, SOURCE_FOLDER) for p in scan_source_directory()}
+    if not source_rel:
+        logging.warning('Source contains no video files – '
+                        'skip clean-up to protect library.')
+        return
+
+    # Pre-compute the stem (path without ext) of every source video
+    source_stems = {os.path.splitext(p)[0] for p in source_rel}
+
+    for root, _, files in os.walk(DEST_FOLDER):
+        for file in files:
+            full_path = os.path.join(root, file)
+
+            # We only touch our own output
+            if not file.lower().endswith(('.mkv', '.mkv.tmp')):
+                continue
+
+            rel_dest = os.path.relpath(full_path, DEST_FOLDER)
+            dest_stem, dest_ext = os.path.splitext(rel_dest)          # *.mkv or *.mkv.tmp
+            if dest_ext == '.tmp':
+                dest_stem, _ = os.path.splitext(dest_stem)            # strip second ext
+
+            if dest_stem not in source_stems:
+                # extra guard for *.tmp : keep it if still being written
+                if file.endswith('.tmp') and is_file_growing(full_path):
+                    logging.info(f'Skip active tmp file: {full_path}')
+                    continue
+                try:
+                    os.remove(full_path)
+                    logging.info(f'Removed orphaned encode: {full_path}')
+                except Exception as e:
+                    logging.error(f'Failed to delete {full_path}: {e}')
 
 if __name__ == "__main__":
     freeze_support()
@@ -292,6 +340,7 @@ if __name__ == "__main__":
     logging.info(f'Running with {max_workers} workers')
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
 
+    cleanup_destination()
     event_handler = VideoHandler()
     observer = Observer()
     observer.schedule(event_handler, path=SOURCE_FOLDER, recursive=True)
