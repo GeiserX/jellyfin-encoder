@@ -332,6 +332,8 @@ def cleanup_destination():
                 except Exception as e:
                     logging.error(f'Failed to delete {full_path}: {e}')
 
+CLEANUP_INTERVAL_HOURS = int(os.getenv('CLEANUP_INTERVAL_HOURS', '6'))
+
 if __name__ == "__main__":
     freeze_support()
     manager = Manager()
@@ -350,9 +352,17 @@ if __name__ == "__main__":
     for file_path in scan_source_directory():
         submit_encoding_task(file_path)
 
+    last_cleanup = time.time()
+    cleanup_interval_seconds = CLEANUP_INTERVAL_HOURS * 3600
+
     try:
         while True:
-            time.sleep(1)
+            time.sleep(60)  # Check every minute
+            # Periodic cleanup to catch orphaned files
+            if time.time() - last_cleanup > cleanup_interval_seconds:
+                logging.info('Running periodic cleanup...')
+                cleanup_destination()
+                last_cleanup = time.time()
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
