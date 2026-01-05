@@ -49,7 +49,19 @@ class VideoHandler(FileSystemEventHandler):
 
 def is_video_file(filename):
     vid_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm')
-    return filename.lower().endswith(vid_ext)
+    if not filename.lower().endswith(vid_ext):
+        return False
+    # Skip version symlinks (created by this script)
+    if SYMLINK_VERSION_SUFFIX and filename.endswith(f'{SYMLINK_VERSION_SUFFIX}.mkv'):
+        return False
+    return True
+
+
+def is_version_symlink(filepath):
+    """Check if a file is a version symlink created by this script."""
+    if not SYMLINK_VERSION_SUFFIX:
+        return False
+    return os.path.basename(filepath).endswith(f'{SYMLINK_VERSION_SUFFIX}.mkv') and os.path.islink(filepath)
 
 
 def wait_for_file_completion(filepath, timeout=TIMEOUT):
