@@ -72,6 +72,20 @@ class VideoHandler(FileSystemEventHandler):
             delete_encoded_video(event.src_path)
 
 
+def is_already_low_quality(filename):
+    """Check if file is already 720p or lower quality (no need to transcode)."""
+    name_lower = filename.lower()
+    # Skip files that are already 720p or lower
+    low_quality_markers = ['720p', '480p', '360p', 'sd', 'dvdrip', 'hdtv', 'webrip']
+    # But don't skip if they're higher quality
+    high_quality_markers = ['1080p', '2160p', '4k', 'uhd', 'bluray', 'bdremux', 'remux']
+    
+    has_low = any(marker in name_lower for marker in low_quality_markers)
+    has_high = any(marker in name_lower for marker in high_quality_markers)
+    
+    # Only consider low quality if there's no high quality marker
+    return has_low and not has_high
+
 def is_video_file(filename):
     vid_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm')
     if not filename.lower().endswith(vid_ext):
@@ -166,6 +180,12 @@ def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
         logging.info(f'Already processing: {source_path}')
         return
+    
+    # Skip files that are already 720p or lower quality - no need to transcode
+    if is_already_low_quality(source_path):
+        logging.info(f'Skipping low quality file (already 720p or lower): {source_path}')
+        return
+    
     processing_files[source_path] = True
 
     try:
