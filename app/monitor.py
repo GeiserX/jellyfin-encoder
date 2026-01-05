@@ -72,9 +72,45 @@ class VideoHandler(FileSystemEventHandler):
             delete_encoded_video(event.src_path)
 
 
-def is_already_low_quality(filename):
-    """Check if file is already 720p or lower quality (no need to transcode)."""
+def get_video_resolution_from_ffprobe(filepath):
+    """Get video resolution (height) using ffprobe."""
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+               '-show_entries', 'stream=height', '-of', 'csv=p=0', filepath]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            height = int(result.stdout.strip().split('\n')[0])
+            return height
+    except Exception as e:
+        logging.debug(f'ffprobe resolution check failed for {filepath}: {e}')
+    return None
+
+
+def get_metadata_info(filepath):
+    """Extract metadata from video file (year, title, etc.)."""
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-show_entries',
+               'format_tags=title,date,year,creation_time',
+               '-of', 'json', filepath]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            tags = data.get('format', {}).get('tags', {})
+            return tags
+    except Exception as e:
+        logging.debug(f'Metadata extraction failed for {filepath}: {e}')
+    return {}
+
+
+def is_already_low_quality(filepath):
+    """
+    Check if file is already 720p or lower quality (no need to transcode).
+    
+    First checks filename patterns, then falls back to ffprobe for actual resolution.
+    """
+    filename = os.path.basename(filepath)
     name_lower = filename.lower()
+    
     # Skip files that are already 720p or lower
     low_quality_markers = ['720p', '480p', '360p', 'sd', 'dvdrip', 'hdtv', 'webrip']
     # But don't skip if they're higher quality
@@ -83,8 +119,25 @@ def is_already_low_quality(filename):
     has_low = any(marker in name_lower for marker in low_quality_markers)
     has_high = any(marker in name_lower for marker in high_quality_markers)
     
-    # Only consider low quality if there's no high quality marker
-    return has_low and not has_high
+    # If filename clearly indicates quality, use that
+    if has_high:
+        return False  # High quality - needs transcoding
+    if has_low:
+        return True   # Low quality - skip
+    
+    # Filename doesn't indicate quality - use ffprobe
+    height = get_video_resolution_from_ffprobe(filepath)
+    if height is not None:
+        logging.info(f'Detected resolution via ffprobe: {height}p for {filename}')
+        if height <= 720:
+            logging.info(f'Skipping file (ffprobe: {height}p ≤ 720p): {filename}')
+            return True  # Already 720p or lower
+        else:
+            return False  # Higher than 720p - needs transcoding
+    
+    # Could not determine - assume it needs transcoding (safer)
+    logging.info(f'Could not determine resolution for {filename}, will transcode')
+    return False
 
 def is_video_file(filename):
     vid_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm')
@@ -185,6 +238,11 @@ def encode_video(source_path, processed_files, processing_files):
     if is_already_low_quality(source_path):
         logging.info(f'Skipping low quality file (already 720p or lower): {source_path}')
         return
+    
+    # Log metadata if available (for debugging/verification)
+    metadata = get_metadata_info(source_path)
+    if metadata:
+        logging.info(f'Metadata for {os.path.basename(source_path)}: {metadata}')
     
     processing_files[source_path] = True
 
