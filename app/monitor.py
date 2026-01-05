@@ -18,6 +18,13 @@ ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower()  # hevc or av1
 SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'F:\\Series')
 DEST_FOLDER = os.getenv('DEST_FOLDER', 'G:\\Series')
 
+# Symlink settings for Jellyfin multi-version support
+# SYMLINK_TARGET_PREFIX: The path prefix for symlink targets AS SEEN BY THE SOURCE HOST
+# Example: If source is mounted from watchtower, and dest is on geiserback,
+#          this should be watchtower's NFS mount path to geiserback's dest folder
+SYMLINK_TARGET_PREFIX = os.getenv('SYMLINK_TARGET_PREFIX', '')  # e.g., '/mnt/remotes/GEISERBACK_ShareMedia/Peliculas'
+SYMLINK_VERSION_SUFFIX = os.getenv('SYMLINK_VERSION_SUFFIX', ' - 720p')  # Version suffix for symlinks
+
 TIMEOUT = 86400
 MAX_SAME_SIZE_COUNT = 60
 
@@ -145,6 +152,8 @@ def encode_video(source_path, processed_files, processing_files):
         if os.path.exists(dest_file_final) and verify_encoded_file(dest_file_final):
             logging.info(f'Valid encoded file exists: {dest_file_final}')
             processed_files[dest_file_final] = True
+            # Ensure version symlink exists even for previously encoded files
+            create_version_symlink(source_path, dest_file_final)
             return
         elif os.path.exists(dest_file_final):
             os.remove(dest_file_final)
@@ -249,6 +258,9 @@ def encode_video(source_path, processed_files, processing_files):
                 os.rename(dest_file_temp, dest_file_final)
                 processed_files[dest_file_final] = True
                 logging.info(f'Encoding succeeded: {dest_file_final}')
+                
+                # Create version symlink for Jellyfin multi-version support
+                create_version_symlink(source_path, dest_file_final)
             else:
                 logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
                 os.remove(dest_file_temp)
@@ -258,6 +270,64 @@ def encode_video(source_path, processed_files, processing_files):
                 os.remove(dest_file_temp)
     finally:
         processing_files.pop(source_path, None)
+
+def create_version_symlink(source_path, dest_file_final):
+    """
+    Create a symlink in the source folder pointing to the encoded file.
+    This enables Jellyfin multi-version detection.
+    
+    The symlink is created next to the original file with a version suffix,
+    and points to the encoded file using SYMLINK_TARGET_PREFIX.
+    """
+    if not SYMLINK_TARGET_PREFIX:
+        return None
+    
+    try:
+        source_dir = os.path.dirname(source_path)
+        source_name, source_ext = os.path.splitext(os.path.basename(source_path))
+        
+        # Create symlink name with version suffix (e.g., "Movie - 720p.mkv")
+        symlink_name = f"{source_name}{SYMLINK_VERSION_SUFFIX}.mkv"
+        symlink_path = os.path.join(source_dir, symlink_name)
+        
+        # Calculate the target path as seen by the source host
+        relative_dest = os.path.relpath(dest_file_final, DEST_FOLDER)
+        symlink_target = os.path.join(SYMLINK_TARGET_PREFIX, relative_dest)
+        
+        # Remove existing symlink if present
+        if os.path.islink(symlink_path):
+            os.unlink(symlink_path)
+            logging.info(f'Removed existing symlink: {symlink_path}')
+        elif os.path.exists(symlink_path):
+            logging.warning(f'Path exists but is not a symlink, skipping: {symlink_path}')
+            return None
+        
+        # Create the symlink
+        os.symlink(symlink_target, symlink_path)
+        logging.info(f'Created version symlink: {symlink_path} -> {symlink_target}')
+        return symlink_path
+    except Exception as e:
+        logging.error(f'Failed to create version symlink for {source_path}: {e}')
+        return None
+
+
+def delete_version_symlink(source_path):
+    """Delete the version symlink associated with a source file."""
+    if not SYMLINK_TARGET_PREFIX:
+        return
+    
+    try:
+        source_dir = os.path.dirname(source_path)
+        source_name, _ = os.path.splitext(os.path.basename(source_path))
+        symlink_name = f"{source_name}{SYMLINK_VERSION_SUFFIX}.mkv"
+        symlink_path = os.path.join(source_dir, symlink_name)
+        
+        if os.path.islink(symlink_path):
+            os.unlink(symlink_path)
+            logging.info(f'Deleted version symlink: {symlink_path}')
+    except Exception as e:
+        logging.error(f'Failed to delete version symlink for {source_path}: {e}')
+
 
 def delete_encoded_video(source_path):
     relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
@@ -270,6 +340,9 @@ def delete_encoded_video(source_path):
         if os.path.exists(f):
             os.remove(f)
             logging.info(f'Deleted: {f}')
+    
+    # Also delete the version symlink
+    delete_version_symlink(source_path)
 
 
 def scan_source_directory():
@@ -329,8 +402,48 @@ def cleanup_destination():
                 try:
                     os.remove(full_path)
                     logging.info(f'Removed orphaned encode: {full_path}')
+                    
+                    # Also remove the corresponding symlink in source folder
+                    source_file_path = os.path.join(SOURCE_FOLDER, dest_stem + '.mkv')
+                    delete_version_symlink(source_file_path)
                 except Exception as e:
                     logging.error(f'Failed to delete {full_path}: {e}')
+
+
+def cleanup_orphaned_symlinks():
+    """
+    Remove version symlinks in SOURCE_FOLDER that point to
+    non-existent destination files.
+    """
+    if not SYMLINK_TARGET_PREFIX:
+        return
+    
+    logging.info('Cleaning up orphaned version symlinks...')
+    suffix = SYMLINK_VERSION_SUFFIX + '.mkv'
+    
+    for root, _, files in os.walk(SOURCE_FOLDER):
+        for file in files:
+            if not file.endswith(suffix):
+                continue
+            
+            full_path = os.path.join(root, file)
+            if not os.path.islink(full_path):
+                continue
+            
+            # Check if the symlink target exists
+            target = os.readlink(full_path)
+            # The target is an absolute path on the source host, but we need to
+            # check if the corresponding file exists in DEST_FOLDER
+            try:
+                # Extract relative path from symlink target
+                rel_path = os.path.relpath(target, SYMLINK_TARGET_PREFIX)
+                dest_file = os.path.join(DEST_FOLDER, rel_path)
+                
+                if not os.path.exists(dest_file):
+                    os.unlink(full_path)
+                    logging.info(f'Removed orphaned symlink: {full_path}')
+            except Exception as e:
+                logging.error(f'Error checking symlink {full_path}: {e}')
 
 CLEANUP_INTERVAL_HOURS = int(os.getenv('CLEANUP_INTERVAL_HOURS', '6'))
 
@@ -343,6 +456,7 @@ if __name__ == "__main__":
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
 
     cleanup_destination()
+    cleanup_orphaned_symlinks()
     event_handler = VideoHandler()
     observer = Observer()
     observer.schedule(event_handler, path=SOURCE_FOLDER, recursive=True)
@@ -362,6 +476,7 @@ if __name__ == "__main__":
             if time.time() - last_cleanup > cleanup_interval_seconds:
                 logging.info('Running periodic cleanup...')
                 cleanup_destination()
+                cleanup_orphaned_symlinks()
                 last_cleanup = time.time()
     except KeyboardInterrupt:
         observer.stop()
