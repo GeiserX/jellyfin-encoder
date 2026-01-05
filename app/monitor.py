@@ -25,6 +25,31 @@ DEST_FOLDER = os.getenv('DEST_FOLDER', 'G:\\Series')
 SYMLINK_TARGET_PREFIX = os.getenv('SYMLINK_TARGET_PREFIX', '')  # e.g., '/mnt/remotes/GEISERBACK_ShareMedia/Peliculas'
 SYMLINK_VERSION_SUFFIX = os.getenv('SYMLINK_VERSION_SUFFIX', ' - 720p')  # Version suffix for symlinks
 
+# Quality suffixes to detect and replace in filenames (for same-folder multi-version)
+QUALITY_SUFFIXES = [' - 4K', ' - 2160p', ' - 1080p', ' - 720p', ' - 480p', ' - SD', ' - HDR', ' - REMUX', ' - Remux']
+
+import re
+def get_version_output_name(source_name):
+    """
+    Generate output filename for multi-version support.
+    If source has a quality suffix, replace it with SYMLINK_VERSION_SUFFIX.
+    Otherwise, append SYMLINK_VERSION_SUFFIX before the extension.
+    """
+    if not SYMLINK_VERSION_SUFFIX:
+        return source_name
+    
+    # Check if source already has our version suffix (skip)
+    if source_name.endswith(SYMLINK_VERSION_SUFFIX.strip()):
+        return None  # Skip - this is already a transcoded version
+    
+    # Try to replace existing quality suffix
+    for suffix in QUALITY_SUFFIXES:
+        if source_name.endswith(suffix):
+            return source_name[:-len(suffix)] + SYMLINK_VERSION_SUFFIX
+    
+    # No quality suffix found - append version suffix
+    return source_name + SYMLINK_VERSION_SUFFIX
+
 TIMEOUT = 86400
 MAX_SAME_SIZE_COUNT = 60
 
@@ -51,9 +76,15 @@ def is_video_file(filename):
     vid_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm')
     if not filename.lower().endswith(vid_ext):
         return False
-    # Skip version symlinks (created by this script)
+    # Skip version files (created by this script - either symlinks or actual transcoded files)
     if SYMLINK_VERSION_SUFFIX and filename.endswith(f'{SYMLINK_VERSION_SUFFIX}.mkv'):
         return False
+    # Also skip files that have our version suffix anywhere (handles case variations)
+    base_name = os.path.basename(filename)
+    if SYMLINK_VERSION_SUFFIX and SYMLINK_VERSION_SUFFIX.strip() in base_name:
+        name_without_ext = os.path.splitext(base_name)[0]
+        if name_without_ext.endswith(SYMLINK_VERSION_SUFFIX.strip()):
+            return False
     return True
 
 
@@ -145,7 +176,19 @@ def encode_video(source_path, processed_files, processing_files):
 
         base_name = os.path.basename(dest_path)
         source_name, _ = os.path.splitext(base_name)
-        dest_file_final = os.path.join(dest_dir, f"{source_name}.mkv")
+        
+        # For same-folder multi-version encoding, use version-aware naming
+        # This replaces quality suffix (e.g., "- 1080p" -> "- 720p")
+        same_folder_mode = os.path.normpath(SOURCE_FOLDER) == os.path.normpath(DEST_FOLDER)
+        if same_folder_mode and SYMLINK_VERSION_SUFFIX:
+            output_name = get_version_output_name(source_name)
+            if output_name is None:
+                logging.info(f'Skipping already transcoded file: {source_path}')
+                return
+            dest_file_final = os.path.join(dest_dir, f"{output_name}.mkv")
+        else:
+            dest_file_final = os.path.join(dest_dir, f"{source_name}.mkv")
+        
         dest_file_temp = dest_file_final + ".tmp"
 
         if os.path.exists(dest_file_temp):
@@ -346,15 +389,27 @@ def delete_encoded_video(source_path):
     dest_path = os.path.join(DEST_FOLDER, relative_path)
     dest_dir = os.path.dirname(dest_path)
     source_name, _ = os.path.splitext(os.path.basename(dest_path))
-    encoded_file = os.path.join(dest_dir, f"{source_name}.mkv")
+    
+    # For same-folder mode, use version-aware naming
+    same_folder_mode = os.path.normpath(SOURCE_FOLDER) == os.path.normpath(DEST_FOLDER)
+    if same_folder_mode and SYMLINK_VERSION_SUFFIX:
+        output_name = get_version_output_name(source_name)
+        if output_name:
+            encoded_file = os.path.join(dest_dir, f"{output_name}.mkv")
+        else:
+            return  # This was a transcoded file itself
+    else:
+        encoded_file = os.path.join(dest_dir, f"{source_name}.mkv")
+    
     temp_file = encoded_file + ".tmp"
     for f in [encoded_file, temp_file]:
         if os.path.exists(f):
             os.remove(f)
             logging.info(f'Deleted: {f}')
     
-    # Also delete the version symlink
-    delete_version_symlink(source_path)
+    # Also delete the version symlink (only relevant for separate-folder mode)
+    if not same_folder_mode:
+        delete_version_symlink(source_path)
 
 
 def scan_source_directory():
