@@ -143,11 +143,22 @@ def is_video_file(filename):
     vid_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm')
     if not filename.lower().endswith(vid_ext):
         return False
+    
+    base_name = os.path.basename(filename)
+    
+    # Skip macOS resource fork files (._filename) and other system/temp files
+    # These are metadata files that look like videos but contain no actual video data
+    if base_name.startswith('._'):
+        return False
+    if base_name.startswith('.'):
+        return False  # Skip all hidden files
+    if base_name.endswith('.tmp') or base_name.endswith('.part'):
+        return False  # Skip temporary/partial files
+    
     # Skip version files (created by this script - either symlinks or actual transcoded files)
     if SYMLINK_VERSION_SUFFIX and filename.endswith(f'{SYMLINK_VERSION_SUFFIX}.mkv'):
         return False
     # Also skip files that have our version suffix anywhere (handles case variations)
-    base_name = os.path.basename(filename)
     if SYMLINK_VERSION_SUFFIX and SYMLINK_VERSION_SUFFIX.strip() in base_name:
         name_without_ext = os.path.splitext(base_name)[0]
         if name_without_ext.endswith(SYMLINK_VERSION_SUFFIX.strip()):
