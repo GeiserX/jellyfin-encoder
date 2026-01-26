@@ -1,7 +1,7 @@
 services:
-  encoder:
-    image: drumsergio/automatic-ffmpeg:0.0.16
-    container_name: av1_encoder
+  jellyfin-encoder:
+    image: drumsergio/jellyfin-encoder:latest
+    container_name: jellyfin-encoder
     devices:
       - /dev/dri:/dev/dri
     volumes:
@@ -9,14 +9,15 @@ services:
       - /dest:/app/destination
     environment:
       ENABLE_HW_ACCEL: "true"
-      HW_ENCODING_TYPE: "nvidia"
+      HW_ENCODING_TYPE: "intel"
       ENCODING_QUALITY: "LOW"
       SOURCE_FOLDER: "/app/source"
       DEST_FOLDER: "/app/destination"
-      ENCODING_CODEC: "av1"
+      ENCODING_CODEC: "hevc"
     restart: always
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
+    # For NVIDIA GPU support, uncomment below:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]

@@ -1,8 +1,6 @@
-# automatic-ffmpeg
+# jellyfin-encoder
 
-Monitors a folder to detect video addition/removal and triggers encode/delete operation in the target folder.
-
-A very opinionated and totally custom way to convert files into small-footprint media to be consumed via Jellyfin on smartphone devices.
+Automatic video transcoder for Jellyfin mobile streaming. Monitors folders and encodes videos to 720p HEVC/AV1 for optimal mobile playback.
 
 ## Features
 
@@ -18,9 +16,9 @@ A very opinionated and totally custom way to convert files into small-footprint 
 
 ```yaml
 services:
-  encoder:
-    image: drumsergio/automatic-ffmpeg:latest
-    container_name: encoder
+  jellyfin-encoder:
+    image: drumsergio/jellyfin-encoder:latest
+    container_name: jellyfin-encoder
     devices:
       - /dev/dri:/dev/dri  # For Intel QSV
     volumes:
@@ -84,7 +82,7 @@ python scripts/compare_encodes.py -s /path/to/source -d /path/to/dest --format c
 python scripts/compare_encodes.py -s /path/to/source -d /path/to/dest --show-skipped
 
 # Run inside Docker container
-docker exec encoder python /app/scripts/compare_encodes.py
+docker exec jellyfin-encoder python /app/scripts/compare_encodes.py
 ```
 
 #### Options

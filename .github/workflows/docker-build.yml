@@ -11,7 +11,7 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: drumsergio/automatic-ffmpeg
+  IMAGE_NAME: drumsergio/jellyfin-encoder
 
 jobs:
   build:
