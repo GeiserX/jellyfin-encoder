@@ -224,8 +224,20 @@ def get_audio_streams(source_path):
     stream_info = json.loads(ffprobe_process.stdout)
     return stream_info.get('streams', [])
 
-# Helper function to safely find subtitle streams
+# Subtitle codec categories for MKV output
+# Copy-safe: can be directly copied to MKV container
+SUBTITLE_CODECS_COPY = ['ass', 'ssa', 'srt', 'subrip', 'hdmv_pgs_subtitle', 'dvb_subtitle']
+# Convert to SRT: text-based codecs that need conversion for MKV
+SUBTITLE_CODECS_CONVERT = ['mov_text', 'webvtt']
+
+
 def get_subtitle_streams(source_path):
+    """
+    Analyze subtitle streams and categorize them for MKV output.
+    
+    Returns:
+        dict with 'copy' and 'convert' lists, each containing (stream_index, codec_name) tuples
+    """
     ffprobe_cmd = [
         'ffprobe', '-v', 'error', '-select_streams', 's',
         '-show_entries', 'stream=index,codec_name', '-of', 'json', source_path
@@ -234,11 +246,28 @@ def get_subtitle_streams(source_path):
                                      stderr=subprocess.PIPE, text=True)
     if ffprobe_process.returncode != 0:
         logging.error(f'ffprobe failed subtitle check for file: {source_path}')
-        return []
+        return {'copy': [], 'convert': []}
+    
     stream_info = json.loads(ffprobe_process.stdout)
-    safe_subtitle_codecs = ['ass', 'srt', 'subrip', 'mov_text', 'hdmv_pgs_subtitle']
-    return [stream['index'] for stream in stream_info.get('streams', [])
-            if stream['codec_name'] in safe_subtitle_codecs]
+    result = {'copy': [], 'convert': []}
+    
+    for stream in stream_info.get('streams', []):
+        codec = stream.get('codec_name', '')
+        index = stream.get('index')
+        
+        if not codec or index is None:
+            # Unknown codec (e.g., WebVTT reported as empty) - skip
+            logging.debug(f'Skipping subtitle stream {index} with unknown codec')
+            continue
+        
+        if codec in SUBTITLE_CODECS_COPY:
+            result['copy'].append((index, codec))
+        elif codec in SUBTITLE_CODECS_CONVERT:
+            result['convert'].append((index, codec))
+        else:
+            logging.debug(f'Skipping unsupported subtitle codec: {codec} (stream {index})')
+    
+    return result
 
 def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
@@ -384,8 +413,22 @@ def encode_video(source_path, processed_files, processing_files):
             # Re-encode all audio streams to AC3, downmixed to stereo
             command.extend([f'-c:a:{idx}', 'ac3', f'-b:a:{idx}', '192k', f'-ac:a:{idx}', '2'])
 
-        # Map subtitles
-        command.extend(['-map', '0:s?', '-c:s', 'copy'])
+        # Map subtitles with smart codec handling for MKV compatibility
+        subtitle_streams = get_subtitle_streams(source_path)
+        sub_output_idx = 0
+        
+        # Copy-safe subtitles (can be copied directly to MKV)
+        for stream_idx, codec in subtitle_streams['copy']:
+            command.extend(['-map', f'0:{stream_idx}', f'-c:s:{sub_output_idx}', 'copy'])
+            sub_output_idx += 1
+        
+        # Subtitles that need conversion to SRT for MKV compatibility
+        for stream_idx, codec in subtitle_streams['convert']:
+            command.extend(['-map', f'0:{stream_idx}', f'-c:s:{sub_output_idx}', 'srt'])
+            sub_output_idx += 1
+        
+        if sub_output_idx == 0:
+            logging.info(f'No compatible subtitle streams found for: {os.path.basename(source_path)}')
 
         # Set output format and destination file
         command.extend(['-f', 'matroska', dest_file_temp])
