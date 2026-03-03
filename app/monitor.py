@@ -5,7 +5,7 @@ import logging
 import subprocess
 import concurrent.futures
 from multiprocessing import Manager, freeze_support
-from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 import json  # Added import for json module
 
@@ -657,7 +657,7 @@ if __name__ == "__main__":
     cleanup_destination()
     cleanup_orphaned_symlinks()
     event_handler = VideoHandler()
-    observer = Observer()
+    observer = PollingObserver()
     observer.schedule(event_handler, path=SOURCE_FOLDER, recursive=True)
     observer.start()
 
