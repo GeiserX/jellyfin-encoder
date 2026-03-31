@@ -223,6 +223,15 @@ STATUS: Issues found - 23 missing encodes, 20 orphaned files
 
 </details>
 
+## Related Jellyfin Tools
+
+| Project | Description |
+|---------|-------------|
+| [jelly-subtitles](https://github.com/GeiserX/jelly-subtitles) | Local AI-powered subtitle generation using Whisper |
+| [jelly-covers](https://github.com/GeiserX/jelly-covers) | Fallback cover extraction from PDF, EPUB, and audiobook files |
+| [jellyfin-telegram-channel-sync](https://github.com/GeiserX/jellyfin-telegram-channel-sync) | Sync user access with Telegram channel membership |
+
+
 ## Contributing
 
 Contributions are welcome. Please open an issue to discuss proposed changes before submitting a pull request.
