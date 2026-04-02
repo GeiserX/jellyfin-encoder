@@ -223,13 +223,18 @@ STATUS: Issues found - 23 missing encodes, 20 orphaned files
 
 </details>
 
-## Related Jellyfin Tools
+## Other Jellyfin Projects by GeiserX
 
-| Project | Description |
-|---------|-------------|
-| [jelly-subtitles](https://github.com/GeiserX/jelly-subtitles) | Local AI-powered subtitle generation using Whisper |
-| [jelly-covers](https://github.com/GeiserX/jelly-covers) | Fallback cover extraction from PDF, EPUB, and audiobook files |
-| [jellyfin-telegram-channel-sync](https://github.com/GeiserX/jellyfin-telegram-channel-sync) | Sync user access with Telegram channel membership |
+- [smart-covers](https://github.com/GeiserX/smart-covers) — Plugin for fallback cover extraction from PDF, EPUB, and audiobooks
+- [whisper-subs](https://github.com/GeiserX/whisper-subs) — Plugin for local AI-powered subtitle generation using Whisper
+- [jellyfin-quality-gate](https://github.com/GeiserX/jellyfin-quality-gate) — Plugin to restrict users to specific media versions
+- [jellyfin-telegram-channel-sync](https://github.com/GeiserX/jellyfin-telegram-channel-sync) — Sync Jellyfin access with Telegram channel membership
+
+## Related Music Pipeline Tools
+
+- [telegram-slskd-local-bot](https://github.com/GeiserX/telegram-slskd-local-bot) — Automated music discovery and download via Telegram
+- [slskd-transform](https://github.com/GeiserX/slskd-transform) — Bulk upgrade lossy to lossless FLAC via Soulseek
+- [audio-transcode-watcher](https://github.com/GeiserX/audio-transcode-watcher) — Automated multi-format audio transcoding
 
 
 ## Contributing
