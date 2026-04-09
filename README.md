@@ -227,7 +227,7 @@ STATUS: Issues found - 23 missing encodes, 20 orphaned files
 
 - [smart-covers](https://github.com/GeiserX/smart-covers) — Plugin for fallback cover extraction from PDF, EPUB, and audiobooks
 - [whisper-subs](https://github.com/GeiserX/whisper-subs) — Plugin for local AI-powered subtitle generation using Whisper
-- [jellyfin-quality-gate](https://github.com/GeiserX/jellyfin-quality-gate) — Plugin to restrict users to specific media versions
+- [quality-gate](https://github.com/GeiserX/quality-gate) — Plugin to restrict users to specific media versions
 - [jellyfin-telegram-channel-sync](https://github.com/GeiserX/jellyfin-telegram-channel-sync) — Sync Jellyfin access with Telegram channel membership
 
 ## Related Music Pipeline Tools
