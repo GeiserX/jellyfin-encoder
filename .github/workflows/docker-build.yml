@@ -24,7 +24,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install watchdog==6.0.0
+        run: pip install watchdog==6.0.0 pytest
       - name: Run tests
         run: python -m pytest tests/ -v
 
