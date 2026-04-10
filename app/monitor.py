@@ -564,6 +564,7 @@ def cleanup_destination():
     Safety rails:
         • SOURCE_FOLDER must exist.
         • SOURCE_FOLDER must contain ≥1 video file.
+        • Source must have ≥50% as many videos as destination (mount health check).
         • .tmp files are deleted only if they are NOT growing.
     """
     if not os.path.isdir(SOURCE_FOLDER):
@@ -575,6 +576,27 @@ def cleanup_destination():
     if not source_rel:
         logging.warning('Source contains no video files – '
                         'skip clean-up to protect library.')
+        return
+
+    # Count destination MKV files (excluding .tmp) to detect degraded mounts.
+    # In normal operation source always has >= destination files because
+    # destination only contains encodes of source files.  If source drops
+    # below 50% of destination, the mount is likely degraded/partial.
+    dest_mkv_count = 0
+    for root, _, files in os.walk(DEST_FOLDER):
+        for file in files:
+            if file.lower().endswith('.mkv') and not file.lower().endswith('.mkv.tmp'):
+                dest_mkv_count += 1
+
+    source_count = len(source_rel)
+    if dest_mkv_count > 0 and source_count < dest_mkv_count * 0.5:
+        logging.error(
+            f'SOURCE MOUNT MAY BE DEGRADED – source has {source_count} video files '
+            f'but destination has {dest_mkv_count} encoded files. '
+            f'Source should have >= destination in normal operation. '
+            f'Refusing cleanup to protect encoded library. '
+            f'Check that the network mount is fully available.'
+        )
         return
 
     # Pre-compute the stem (path without ext) of every source video
@@ -613,13 +635,35 @@ def cleanup_orphaned_symlinks():
     """
     Remove version symlinks in SOURCE_FOLDER that point to
     non-existent destination files.
+
+    Safety rail: if source has < 50% of destination file count,
+    the mount may be degraded — refuse to clean up symlinks.
     """
     if not SYMLINK_TARGET_PREFIX:
         return
-    
+
     logging.info('Cleaning up orphaned version symlinks...')
+
+    # Same mount-health check as cleanup_destination()
+    source_videos = scan_source_directory()
+    dest_mkv_count = 0
+    for root, _, files in os.walk(DEST_FOLDER):
+        for file in files:
+            if file.lower().endswith('.mkv') and not file.lower().endswith('.mkv.tmp'):
+                dest_mkv_count += 1
+
+    source_count = len(source_videos)
+    if dest_mkv_count > 0 and source_count < dest_mkv_count * 0.5:
+        logging.error(
+            f'SOURCE MOUNT MAY BE DEGRADED – source has {source_count} video files '
+            f'but destination has {dest_mkv_count} encoded files. '
+            f'Refusing symlink cleanup to protect library. '
+            f'Check that the network mount is fully available.'
+        )
+        return
+
     suffix = SYMLINK_VERSION_SUFFIX + '.mkv'
-    
+
     for root, _, files in os.walk(SOURCE_FOLDER):
         for file in files:
             if not file.endswith(suffix):
