@@ -19,7 +19,7 @@
 
 ## Features
 
-- **Automatic folder monitoring** -- watches source directories for new, modified, and deleted files using polling (NFS/CIFS compatible)
+- **Automatic folder monitoring** -- watches source directories for new and deleted files using polling (NFS/CIFS compatible)
 - **Hardware-accelerated encoding** -- NVIDIA NVENC and Intel Quick Sync Video (QSV), with transparent software fallback (libx265 / libsvtav1)
 - **Smart skip logic** -- detects files already at 720p or lower via filename heuristics and ffprobe resolution analysis
 - **Jellyfin multi-version support** -- creates version symlinks so Jellyfin presents both original and transcoded copies to the user
@@ -146,7 +146,21 @@ The encoder periodically removes orphaned encodes (files in `DEST_FOLDER` with n
 
 **Same-folder mode** (`SOURCE_FOLDER == DEST_FOLDER`): versioned output filenames (e.g., `Movie - 720p.mkv`) are recognized as valid encodes and excluded from orphan cleanup.
 
-**Limitations**: The persisted-count and ratio guards use a 50% threshold. A mount that exposes more than half its files will pass both guards, potentially allowing cleanup of files in invisible subtrees. The delete-event guard checks mount liveness but does not perform ratio checks on individual events.
+**Delete-event rate limiter**: If more than 50 delete events fire within 60 seconds, further deletes are suppressed. This prevents mount outages from cascading into mass encode deletion. The limit resets automatically after the window expires.
+
+**Limitations**: The persisted-count and ratio guards use a 50% threshold. A mount that exposes more than half its files will pass both guards, potentially allowing cleanup of files in invisible subtrees. After bulk intentional deletions, you may need to delete `DEST_FOLDER/.encoder_source_count` to reset the baseline — cleanup will refuse to run until the persisted count is reset or the source count recovers above 50%.
+
+### Upgrading from < 1.1.0
+
+Starting with v1.1.0, encoded outputs always include the version suffix (e.g., `Movie - 720p.mkv` instead of `Movie.mkv`). Existing encodes without the suffix will be re-encoded. To avoid this, rename them before upgrading:
+
+```bash
+# Dry-run (shows what would be renamed)
+docker exec jellyfin-encoder python /app/scripts/migrate_encode_names.py
+
+# Apply renames
+docker exec jellyfin-encoder python /app/scripts/migrate_encode_names.py --apply
+```
 
 ## Architecture
 

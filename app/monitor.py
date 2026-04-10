@@ -713,10 +713,9 @@ def cleanup_destination():
                 try:
                     os.remove(full_path)
                     logging.info(f'Removed orphaned encode: {full_path}')
-                    
-                    # Also remove the corresponding symlink in source folder
-                    source_file_path = os.path.join(SOURCE_FOLDER, dest_stem + '.mkv')
-                    delete_version_symlink(source_file_path)
+                    # Stale version symlinks (if any) are cleaned up by
+                    # cleanup_orphaned_symlinks() which correctly resolves
+                    # symlink targets rather than reconstructing source names.
                 except Exception as e:
                     logging.error(f'Failed to delete {full_path}: {e}')
 

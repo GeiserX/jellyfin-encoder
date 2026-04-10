@@ -3,6 +3,8 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -30,6 +32,7 @@ jobs:
 
   build:
     needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
