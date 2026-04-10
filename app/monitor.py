@@ -676,8 +676,12 @@ def cleanup_destination():
         )
         return
 
-    # Pre-compute the stem (path without ext) of every source video
+    # Pre-compute the stem (path without ext) of every source video.
+    # Include both full relative paths AND basename-only stems so that
+    # flat dest layouts (older encoder versions stored encodes without
+    # mirroring the source directory structure) are also recognized.
     source_stems = {os.path.splitext(p)[0] for p in source_rel}
+    source_stems |= {os.path.basename(s) for s in source_stems}
 
     # Versioned outputs (e.g., "Movie - 720p") are valid encodes produced by
     # encode_video(), not orphans.  They are excluded from scan_source_directory()
