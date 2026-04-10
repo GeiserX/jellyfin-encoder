@@ -302,10 +302,8 @@ def encode_video(source_path, processed_files, processing_files):
         base_name = os.path.basename(dest_path)
         source_name, _ = os.path.splitext(base_name)
         
-        # For same-folder multi-version encoding, use version-aware naming
-        # This replaces quality suffix (e.g., "- 1080p" -> "- 720p")
-        same_folder_mode = os.path.normpath(SOURCE_FOLDER) == os.path.normpath(DEST_FOLDER)
-        if same_folder_mode and SYMLINK_VERSION_SUFFIX:
+        # Always append version suffix (e.g., " - 720p") for Jellyfin multi-version detection
+        if SYMLINK_VERSION_SUFFIX:
             output_name = get_version_output_name(source_name)
             if output_name is None:
                 logging.info(f'Skipping already transcoded file: {source_path}')
@@ -529,9 +527,8 @@ def delete_encoded_video(source_path):
     dest_dir = os.path.dirname(dest_path)
     source_name, _ = os.path.splitext(os.path.basename(dest_path))
     
-    # For same-folder mode, use version-aware naming
-    same_folder_mode = os.path.normpath(SOURCE_FOLDER) == os.path.normpath(DEST_FOLDER)
-    if same_folder_mode and SYMLINK_VERSION_SUFFIX:
+    # Use version-aware naming to find the encoded file
+    if SYMLINK_VERSION_SUFFIX:
         output_name = get_version_output_name(source_name)
         if output_name:
             encoded_file = os.path.join(dest_dir, f"{output_name}.mkv")
@@ -546,9 +543,8 @@ def delete_encoded_video(source_path):
             os.remove(f)
             logging.info(f'Deleted: {f}')
     
-    # Also delete the version symlink (only relevant for separate-folder mode)
-    if not same_folder_mode:
-        delete_version_symlink(source_path)
+    # Also delete the version symlink if applicable
+    delete_version_symlink(source_path)
 
 
 def scan_source_directory():
@@ -657,11 +653,10 @@ def cleanup_destination():
     # Pre-compute the stem (path without ext) of every source video
     source_stems = {os.path.splitext(p)[0] for p in source_rel}
 
-    # In same-folder mode, versioned outputs (e.g., "Movie - 720p") are valid
-    # encodes produced by encode_video(), not orphans.  They are excluded from
-    # scan_source_directory() by is_video_file(), so add their stems explicitly.
-    same_folder_mode = os.path.normpath(SOURCE_FOLDER) == os.path.normpath(DEST_FOLDER)
-    if same_folder_mode and SYMLINK_VERSION_SUFFIX:
+    # Versioned outputs (e.g., "Movie - 720p") are valid encodes produced by
+    # encode_video(), not orphans.  They are excluded from scan_source_directory()
+    # by is_video_file(), so add their stems explicitly.
+    if SYMLINK_VERSION_SUFFIX:
         version_stems = set()
         for stem in list(source_stems):
             parent = os.path.dirname(stem)
