@@ -67,6 +67,10 @@ DEFAULT_IGNORE_PATTERNS = [
 LOW_QUALITY_MARKERS = ['720p', '480p', '360p', 'sd', 'dvdrip', 'hdtv', 'webrip']
 HIGH_QUALITY_MARKERS = ['1080p', '2160p', '4k', 'uhd', 'bluray', 'bdremux', 'remux']
 
+# Quality suffixes that the encoder replaces (mirrors monitor.py QUALITY_SUFFIXES)
+QUALITY_SUFFIXES = [' - 4K', ' - 2160p', ' - 1080p', ' - 720p', ' - 480p',
+                    ' - SD', ' - HDR', ' - REMUX', ' - Remux']
+
 
 # ============================================================================
 # Data Classes
@@ -215,48 +219,105 @@ def scan_folder(folder: Path, ignore_patterns: List[re.Pattern]) -> Dict[str, Vi
     return files
 
 
+def _strip_version_suffix(stem: str, version_suffix: str) -> str:
+    """
+    Reverse the version suffix from a destination stem to recover the source stem.
+
+    The encoder applies the suffix in two ways (see monitor.get_version_output_name):
+      1. Replace an existing quality suffix (e.g., ' - 1080p' -> ' - 720p')
+      2. Append the suffix when no quality suffix exists
+
+    This function reverses both transformations.
+    """
+    suffix_stripped = version_suffix.strip().lower()
+
+    # Case 1 & 2: stem ends with the version suffix — strip it.
+    # This reverses the "append" case.  For the "replace" case the original
+    # quality suffix is lost, so we can only match the base stem.
+    if stem.endswith(suffix_stripped):
+        return stem[:-len(suffix_stripped)].rstrip()
+
+    return stem
+
+
 def compare_folders(
     source_folder: Path,
     dest_folder: Path,
     ignore_patterns: List[re.Pattern],
-    check_low_quality: bool = True
+    check_low_quality: bool = True,
+    version_suffix: str = '',
 ) -> ComparisonResult:
     """
     Compare source and destination folders to find encoding gaps.
     """
     result = ComparisonResult(source_folder=source_folder, dest_folder=dest_folder)
-    
+
     # Scan both folders
     print(f"Scanning source folder: {source_folder}", file=sys.stderr)
     source_files = scan_folder(source_folder, ignore_patterns)
-    
+
     print(f"Scanning destination folder: {dest_folder}", file=sys.stderr)
     dest_files = scan_folder(dest_folder, ignore_patterns)
-    
+
     result.total_source_files = len(source_files)
     result.total_dest_files = len(dest_files)
-    
+
     source_stems = set(source_files.keys())
-    dest_stems = set(dest_files.keys())
-    
-    # Find files in source that have encoded versions
-    matched_stems = source_stems & dest_stems
-    result.matched_count = len(matched_stems)
-    
-    # Find missing encodes (in source but not in dest)
-    missing_stems = source_stems - dest_stems
+
+    # Build a mapping from normalised dest stem -> original dest stem.
+    # Normalisation strips the version suffix so that
+    #   source "movie (2024) [1080p]" matches dest "movie (2024) [1080p] - 720p".
+    # For sources whose quality suffix was *replaced* (e.g. ' - 1080p' -> ' - 720p'),
+    # the stripped dest stem becomes the base without any quality tag.  We also
+    # build the expected replacement stems so those match too.
+    dest_to_source: Dict[str, str] = {}  # original dest stem -> matched source stem
+    unmatched_dest: Set[str] = set()
+
+    for dest_stem in dest_files:
+        matched = False
+
+        # Direct match (same stem, e.g. same-folder mode without suffix)
+        if dest_stem in source_stems:
+            dest_to_source[dest_stem] = dest_stem
+            matched = True
+        elif version_suffix:
+            # Try stripping the version suffix from dest to recover source stem
+            base = _strip_version_suffix(dest_stem, version_suffix)
+
+            # Direct base match (source had no quality suffix, encoder appended)
+            if base in source_stems:
+                dest_to_source[dest_stem] = base
+                matched = True
+            else:
+                # Source had a quality suffix that was replaced.
+                # Try re-appending each known quality suffix to the base.
+                for qs in QUALITY_SUFFIXES:
+                    candidate = base + qs.lower()
+                    if candidate in source_stems:
+                        dest_to_source[dest_stem] = candidate
+                        matched = True
+                        break
+
+        if not matched:
+            unmatched_dest.add(dest_stem)
+
+    # Source stems that were matched by at least one dest file
+    matched_source_stems = set(dest_to_source.values())
+    result.matched_count = len(matched_source_stems)
+
+    # Find missing encodes (in source but not matched by any dest)
+    missing_stems = source_stems - matched_source_stems
     for stem in sorted(missing_stems):
         vf = source_files[stem]
         if check_low_quality and is_low_quality(vf.relative_path):
             result.skipped_low_quality.append(vf)
         else:
             result.missing_encodes.append(vf)
-    
-    # Find orphaned encodes (in dest but not in source)
-    orphaned_stems = dest_stems - source_stems
-    for stem in sorted(orphaned_stems):
+
+    # Find orphaned encodes (in dest but not matched to any source)
+    for stem in sorted(unmatched_dest):
         result.orphaned_encodes.append(dest_files[stem])
-    
+
     return result
 
 
@@ -474,7 +535,14 @@ Examples:
         default=os.getenv("IGNORE_PATTERNS", ""),
         help="Additional filename patterns to ignore (comma-separated regex patterns)"
     )
-    
+
+    parser.add_argument(
+        "--suffix",
+        type=str,
+        default=os.getenv("SYMLINK_VERSION_SUFFIX", " - 720p"),
+        help="Version suffix appended to encoded filenames (default: ' - 720p')"
+    )
+
     return parser.parse_args()
 
 
@@ -510,7 +578,8 @@ def main() -> int:
     ignore_patterns = compile_ignore_patterns(additional_patterns)
     
     # Run comparison
-    result = compare_folders(source_folder, dest_folder, ignore_patterns)
+    result = compare_folders(source_folder, dest_folder, ignore_patterns,
+                             version_suffix=args.suffix)
     
     # Format and output results
     if args.format == "json":
