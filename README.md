@@ -15,7 +15,7 @@
 
 ---
 
-**jellyfin-encoder** monitors your media library and automatically transcodes videos to optimized 720p HEVC or AV1 for bandwidth-efficient mobile and remote streaming. It runs as a Docker container, supports NVIDIA NVENC and Intel QSV hardware acceleration with automatic software fallback, and is safe for NFS mounts and multi-instance deployments.
+**jellyfin-encoder** monitors your media library and automatically transcodes videos to optimized 720p HEVC or AV1 for bandwidth-efficient mobile and remote streaming. It runs as a Docker container, supports NVIDIA NVENC and Intel QSV hardware acceleration with automatic software fallback, and uses polling-based observation compatible with NFS, CIFS, and other network filesystems.
 
 ## Features
 
@@ -25,7 +25,7 @@
 - **Jellyfin multi-version support** -- creates version symlinks so Jellyfin presents both original and transcoded copies to the user
 - **Audio normalization** -- re-encodes all audio tracks to stereo AC3 at 192 kbps for consistent mobile playback
 - **Subtitle preservation** -- copies MKV-native subtitle codecs and converts incompatible ones (MOV text, WebVTT) to SRT
-- **Automatic cleanup** -- periodically removes orphaned encodes and stale symlinks when source files are deleted
+- **Guarded automatic cleanup** -- periodically removes orphaned encodes and stale symlinks with mount-health checks to prevent mass deletion (see [Safety & Cleanup](#safety--cleanup) below)
 - **Multi-instance safe** -- temp-file and lock-based workflow prevents conflicts when multiple containers share the same destination
 - **Configurable quality presets** -- LOW, MEDIUM, and HIGH profiles with per-codec CQ/CRF tuning
 
@@ -130,6 +130,23 @@ Set `HW_ENCODING_TYPE: "intel"`. Supported encoders: `hevc_qsv`, `av1_qsv`.
 ### Software Fallback
 
 If hardware acceleration is disabled or unavailable, the encoder falls back to `libx265` (HEVC) or `libsvtav1` (AV1) using CRF-based quality control. Worker count scales to the number of available CPU cores.
+
+## Safety & Cleanup
+
+The encoder periodically removes orphaned encodes (files in `DEST_FOLDER` with no matching source) and stale version symlinks. Several safety rails prevent accidental mass deletion:
+
+| Guard | Scope | Behavior |
+|---|---|---|
+| **Source not accessible** | `cleanup_destination`, `cleanup_orphaned_symlinks` | Aborts if `SOURCE_FOLDER` is not a directory |
+| **Empty source** | `cleanup_destination` | Aborts if zero video files are found in source |
+| **Persisted count** (primary) | `cleanup_destination`, `cleanup_orphaned_symlinks` | After each successful cleanup, the source video count is written to `DEST_FOLDER/.encoder_source_count`. If the current count drops below 50% of the persisted value, cleanup is refused. To reset after intentionally shrinking the library, delete the `.encoder_source_count` file. |
+| **Source vs destination ratio** (secondary) | `cleanup_destination`, `cleanup_orphaned_symlinks` | If source video count is less than 50% of destination encode count, cleanup is refused |
+| **Mount health on delete events** | `VideoHandler.on_deleted` | Before trusting a file-delete event from the polling observer, the handler verifies the source mount is responsive. If not, the event is ignored. |
+| **Growing tmp files** | `cleanup_destination` | `.tmp` files are kept if they are still being written |
+
+**Same-folder mode** (`SOURCE_FOLDER == DEST_FOLDER`): versioned output filenames (e.g., `Movie - 720p.mkv`) are recognized as valid encodes and excluded from orphan cleanup.
+
+**Limitations**: The persisted-count and ratio guards use a 50% threshold. A mount that exposes more than half its files will pass both guards, potentially allowing cleanup of files in invisible subtrees. The delete-event guard checks mount liveness but does not perform ratio checks on individual events.
 
 ## Architecture
 
@@ -245,13 +262,6 @@ Contributions are welcome. Please open an issue to discuss proposed changes befo
 2. Create a feature branch (`git checkout -b feature/my-change`)
 3. Commit your changes
 4. Open a pull request against `main`
-
-## Other Jellyfin Projects by GeiserX
-
-- [quality-gate](https://github.com/GeiserX/quality-gate) — Restrict users to specific media versions based on configurable path-based policies
-- [smart-covers](https://github.com/GeiserX/smart-covers) — Cover extraction for books, audiobooks, comics, magazines, and music libraries with online fallback
-- [whisper-subs](https://github.com/GeiserX/whisper-subs) — Automatically generates subtitles using local AI models powered by Whisper
-- [jellyfin-telegram-channel-sync](https://github.com/GeiserX/jellyfin-telegram-channel-sync) — Sync Jellyfin access with Telegram channel membership
 
 ## License
 

@@ -69,6 +69,13 @@ class VideoHandler(FileSystemEventHandler):
             return
         if is_video_file(event.src_path):
             logging.info(f'Video file deleted: {event.src_path}')
+            # Verify source mount is healthy before trusting delete events.
+            # A mount outage can manifest as spurious delete events.
+            if not _source_mount_healthy():
+                logging.warning(
+                    f'Source mount appears unhealthy — ignoring delete event: '
+                    f'{event.src_path}')
+                return
             delete_encoded_video(event.src_path)
 
 
@@ -556,15 +563,53 @@ def scan_source_directory():
 def submit_encoding_task(file_path):
     executor.submit(encode_video, file_path, processed_files, processing_files)
 
+def _source_mount_healthy():
+    """Quick check that the source mount is responsive and populated."""
+    try:
+        if not os.path.isdir(SOURCE_FOLDER):
+            return False
+        entries = os.listdir(SOURCE_FOLDER)
+        return len(entries) > 0
+    except (OSError, IOError):
+        return False
+
+
+def _get_source_count_file():
+    """Path to the persisted source count (dotfile in DEST_FOLDER)."""
+    return os.path.join(DEST_FOLDER, '.encoder_source_count')
+
+
+def _read_last_source_count():
+    """Read the source video count from the last successful cleanup."""
+    try:
+        with open(_get_source_count_file(), 'r') as f:
+            return int(f.read().strip())
+    except (IOError, ValueError, OSError):
+        return 0
+
+
+def _write_source_count(count):
+    """Persist source video count after a successful cleanup."""
+    try:
+        with open(_get_source_count_file(), 'w') as f:
+            f.write(str(count))
+    except (IOError, OSError) as e:
+        logging.warning(f'Could not persist source count: {e}')
+
+
 def cleanup_destination():
     """
     Remove files in DEST_FOLDER that no longer have a
     counterpart in SOURCE_FOLDER.
 
     Safety rails:
-        • SOURCE_FOLDER must exist.
+        • SOURCE_FOLDER must exist and be responsive.
         • SOURCE_FOLDER must contain ≥1 video file.
-        • Source must have ≥50% as many videos as destination (mount health check).
+        • Primary: source count vs last-known healthy count (persisted
+          in DEST_FOLDER/.encoder_source_count). A >50% drop aborts.
+        • Secondary: source count vs destination encode count.
+        • In same-folder mode, versioned output stems are recognized
+          as valid (not orphaned).
         • .tmp files are deleted only if they are NOT growing.
     """
     if not os.path.isdir(SOURCE_FOLDER):
@@ -578,22 +623,32 @@ def cleanup_destination():
                         'skip clean-up to protect library.')
         return
 
-    # Count destination MKV files (excluding .tmp) to detect degraded mounts.
-    # In normal operation source always has >= destination files because
-    # destination only contains encodes of source files.  If source drops
-    # below 50% of destination, the mount is likely degraded/partial.
+    source_count = len(source_rel)
+
+    # Primary guard: compare against last-known healthy source count.
+    # This detects sudden drops even when the mount is partially visible.
+    last_known = _read_last_source_count()
+    if last_known > 0 and source_count < last_known * 0.5:
+        logging.error(
+            f'SOURCE MOUNT MAY BE DEGRADED – source has {source_count} video files '
+            f'but last healthy cleanup found {last_known}. '
+            f'Refusing cleanup to protect encoded library. '
+            f'If the source was intentionally shrunk, delete '
+            f'{_get_source_count_file()} to reset the baseline.'
+        )
+        return
+
+    # Secondary guard: source count vs destination encode count.
     dest_mkv_count = 0
     for root, _, files in os.walk(DEST_FOLDER):
         for file in files:
             if file.lower().endswith('.mkv') and not file.lower().endswith('.mkv.tmp'):
                 dest_mkv_count += 1
 
-    source_count = len(source_rel)
     if dest_mkv_count > 0 and source_count < dest_mkv_count * 0.5:
         logging.error(
             f'SOURCE MOUNT MAY BE DEGRADED – source has {source_count} video files '
             f'but destination has {dest_mkv_count} encoded files. '
-            f'Source should have >= destination in normal operation. '
             f'Refusing cleanup to protect encoded library. '
             f'Check that the network mount is fully available.'
         )
@@ -601,6 +656,20 @@ def cleanup_destination():
 
     # Pre-compute the stem (path without ext) of every source video
     source_stems = {os.path.splitext(p)[0] for p in source_rel}
+
+    # In same-folder mode, versioned outputs (e.g., "Movie - 720p") are valid
+    # encodes produced by encode_video(), not orphans.  They are excluded from
+    # scan_source_directory() by is_video_file(), so add their stems explicitly.
+    same_folder_mode = os.path.normpath(SOURCE_FOLDER) == os.path.normpath(DEST_FOLDER)
+    if same_folder_mode and SYMLINK_VERSION_SUFFIX:
+        version_stems = set()
+        for stem in list(source_stems):
+            parent = os.path.dirname(stem)
+            base = os.path.basename(stem)
+            output_name = get_version_output_name(base)
+            if output_name is not None:
+                version_stems.add(os.path.join(parent, output_name) if parent else output_name)
+        source_stems |= version_stems
 
     for root, _, files in os.walk(DEST_FOLDER):
         for file in files:
@@ -630,6 +699,10 @@ def cleanup_destination():
                 except Exception as e:
                     logging.error(f'Failed to delete {full_path}: {e}')
 
+    # Cleanup succeeded — persist source count for future comparison.
+    _write_source_count(source_count)
+    logging.info(f'Cleanup complete. Persisted source count: {source_count}')
+
 
 def cleanup_orphaned_symlinks():
     """
@@ -644,15 +717,25 @@ def cleanup_orphaned_symlinks():
 
     logging.info('Cleaning up orphaned version symlinks...')
 
-    # Same mount-health check as cleanup_destination()
+    # Mount-health checks (same logic as cleanup_destination)
     source_videos = scan_source_directory()
+    source_count = len(source_videos)
+
+    last_known = _read_last_source_count()
+    if last_known > 0 and source_count < last_known * 0.5:
+        logging.error(
+            f'SOURCE MOUNT MAY BE DEGRADED – source has {source_count} video files '
+            f'but last healthy cleanup found {last_known}. '
+            f'Refusing symlink cleanup to protect library.'
+        )
+        return
+
     dest_mkv_count = 0
     for root, _, files in os.walk(DEST_FOLDER):
         for file in files:
             if file.lower().endswith('.mkv') and not file.lower().endswith('.mkv.tmp'):
                 dest_mkv_count += 1
 
-    source_count = len(source_videos)
     if dest_mkv_count > 0 and source_count < dest_mkv_count * 0.5:
         logging.error(
             f'SOURCE MOUNT MAY BE DEGRADED – source has {source_count} video files '
