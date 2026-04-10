@@ -53,6 +53,13 @@ def get_version_output_name(source_name):
 TIMEOUT = 86400
 MAX_SAME_SIZE_COUNT = 60
 
+# Rate limiter for delete events — prevents mass deletion during mount outages.
+# If more than _DELETE_BURST_LIMIT events fire within _DELETE_BURST_WINDOW seconds,
+# further deletes are suppressed until the window rolls over.
+_DELETE_BURST_LIMIT = 50
+_DELETE_BURST_WINDOW = 60  # seconds
+_delete_event_times = []
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
@@ -70,12 +77,25 @@ class VideoHandler(FileSystemEventHandler):
         if is_video_file(event.src_path):
             logging.info(f'Video file deleted: {event.src_path}')
             # Verify source mount is healthy before trusting delete events.
-            # A mount outage can manifest as spurious delete events.
             if not _source_mount_healthy():
                 logging.warning(
                     f'Source mount appears unhealthy — ignoring delete event: '
                     f'{event.src_path}')
                 return
+            # Rate-limit: if too many deletes fire in a short window, the
+            # mount is likely failing, not the user deleting individual files.
+            now = time.time()
+            _delete_event_times[:] = [
+                t for t in _delete_event_times
+                if now - t < _DELETE_BURST_WINDOW
+            ]
+            if len(_delete_event_times) >= _DELETE_BURST_LIMIT:
+                logging.warning(
+                    f'Delete event burst limit reached '
+                    f'({_DELETE_BURST_LIMIT}/{_DELETE_BURST_WINDOW}s) — '
+                    f'ignoring: {event.src_path}')
+                return
+            _delete_event_times.append(now)
             delete_encoded_video(event.src_path)
 
 
@@ -635,10 +655,16 @@ def cleanup_destination():
         return
 
     # Secondary guard: source count vs destination encode count.
+    # In same-folder mode, use is_video_file() to exclude version-suffixed
+    # outputs from the count (they inflate dest_mkv_count and cause false
+    # "mount degraded" signals).
+    same_folder_mode = os.path.normpath(SOURCE_FOLDER) == os.path.normpath(DEST_FOLDER)
     dest_mkv_count = 0
     for root, _, files in os.walk(DEST_FOLDER):
         for file in files:
             if file.lower().endswith('.mkv') and not file.lower().endswith('.mkv.tmp'):
+                if same_folder_mode and not is_video_file(file):
+                    continue
                 dest_mkv_count += 1
 
     if dest_mkv_count > 0 and source_count < dest_mkv_count * 0.5:
