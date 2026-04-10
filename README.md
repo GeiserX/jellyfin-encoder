@@ -246,6 +246,13 @@ Contributions are welcome. Please open an issue to discuss proposed changes befo
 3. Commit your changes
 4. Open a pull request against `main`
 
+## Other Jellyfin Projects by GeiserX
+
+- [quality-gate](https://github.com/GeiserX/quality-gate) — Restrict users to specific media versions based on configurable path-based policies
+- [smart-covers](https://github.com/GeiserX/smart-covers) — Cover extraction for books, audiobooks, comics, magazines, and music libraries with online fallback
+- [whisper-subs](https://github.com/GeiserX/whisper-subs) — Automatically generates subtitles using local AI models powered by Whisper
+- [jellyfin-telegram-channel-sync](https://github.com/GeiserX/jellyfin-telegram-channel-sync) — Sync Jellyfin access with Telegram channel membership
+
 ## License
 
 This project is licensed under the [GPL-3.0 License](LICENSE).
