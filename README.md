@@ -26,7 +26,7 @@
 - **Audio normalization** -- re-encodes all audio tracks to stereo AC3 at 192 kbps for consistent mobile playback
 - **Subtitle preservation** -- copies MKV-native subtitle codecs and converts incompatible ones (MOV text, WebVTT) to SRT
 - **Guarded automatic cleanup** -- periodically removes orphaned encodes and stale symlinks with mount-health checks to prevent mass deletion (see [Safety & Cleanup](#safety--cleanup) below)
-- **Multi-instance safe** -- temp-file and lock-based workflow prevents conflicts when multiple containers share the same destination
+- **Temp-file workflow** -- encodes to `.tmp` and atomically renames on success, so Jellyfin never indexes incomplete files (note: no cross-container locking — avoid pointing two encoders at the same destination subfolder)
 - **Configurable quality presets** -- LOW, MEDIUM, and HIGH profiles with per-codec CQ/CRF tuning
 
 ## Quick Start

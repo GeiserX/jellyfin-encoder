@@ -30,6 +30,7 @@ class SafetyTestBase(unittest.TestCase):
     def tearDown(self):
         for p in self._patches:
             p.stop()
+        monitor._delete_event_times.clear()
         shutil.rmtree(self.source_dir, ignore_errors=True)
         shutil.rmtree(self.dest_dir, ignore_errors=True)
 
@@ -75,6 +76,40 @@ class TestPersistedSourceCount(SafetyTestBase):
         self.assertEqual(monitor._read_last_source_count(), 0)
 
 
+# ── get_version_output_name ──────────────────────────────────────────
+
+class TestGetVersionOutputName(SafetyTestBase):
+
+    def test_appends_suffix_when_no_quality(self):
+        with patch.object(monitor, 'SYMLINK_VERSION_SUFFIX', ' - 720p'):
+            self.assertEqual(
+                monitor.get_version_output_name('Movie (2024)'),
+                'Movie (2024) - 720p')
+
+    def test_replaces_quality_suffix(self):
+        with patch.object(monitor, 'SYMLINK_VERSION_SUFFIX', ' - 720p'):
+            self.assertEqual(
+                monitor.get_version_output_name('Movie - 1080p'),
+                'Movie - 720p')
+
+    def test_replaces_4k_suffix(self):
+        with patch.object(monitor, 'SYMLINK_VERSION_SUFFIX', ' - 720p'):
+            self.assertEqual(
+                monitor.get_version_output_name('Movie - 4K'),
+                'Movie - 720p')
+
+    def test_skips_already_versioned(self):
+        with patch.object(monitor, 'SYMLINK_VERSION_SUFFIX', ' - 720p'):
+            self.assertIsNone(
+                monitor.get_version_output_name('Movie - 720p'))
+
+    def test_returns_name_when_suffix_empty(self):
+        with patch.object(monitor, 'SYMLINK_VERSION_SUFFIX', ''):
+            self.assertEqual(
+                monitor.get_version_output_name('Movie'),
+                'Movie')
+
+
 # ── cleanup_destination ──────────────────────────────────────────────
 
 class TestCleanupDestination(SafetyTestBase):
@@ -91,7 +126,7 @@ class TestCleanupDestination(SafetyTestBase):
         self.assertTrue(os.path.exists(dest_file))
 
     def test_refuses_when_persisted_count_drops(self):
-        """Source count drops >50% from persisted value → refuse."""
+        """Source count drops >50% from persisted value -> refuse."""
         monitor._write_source_count(100)
         for i in range(10):
             self._touch(self.source_dir, f'movie{i}.mkv')
@@ -104,7 +139,7 @@ class TestCleanupDestination(SafetyTestBase):
         self.assertEqual(len(dest_files), 80)
 
     def test_refuses_when_source_below_half_dest(self):
-        """Source < 50% of dest encodes → refuse (secondary guard)."""
+        """Source < 50% of dest encodes -> refuse (secondary guard)."""
         for i in range(5):
             self._touch(self.source_dir, f'movie{i}.mkv')
         for i in range(20):
@@ -146,6 +181,28 @@ class TestCleanupDestination(SafetyTestBase):
 
             self.assertTrue(os.path.exists(versioned))
 
+    def test_separate_folder_preserves_versioned_encodes(self):
+        """With version suffix, 'Movie - 720p.mkv' in dest is valid."""
+        with patch.object(monitor, 'SYMLINK_VERSION_SUFFIX', ' - 720p'):
+            self._touch(self.source_dir, 'Movie - 1080p.mkv')
+            versioned = self._touch(self.dest_dir, 'Movie - 720p.mkv')
+
+            monitor.cleanup_destination()
+
+            self.assertTrue(os.path.exists(versioned))
+
+    def test_preserves_both_old_and_new_encodes(self):
+        """Migration scenario: old (no suffix) + new (with suffix) both kept."""
+        with patch.object(monitor, 'SYMLINK_VERSION_SUFFIX', ' - 720p'):
+            self._touch(self.source_dir, 'Movie.mkv')
+            old = self._touch(self.dest_dir, 'Movie.mkv')
+            new = self._touch(self.dest_dir, 'Movie - 720p.mkv')
+
+            monitor.cleanup_destination()
+
+            self.assertTrue(os.path.exists(old))
+            self.assertTrue(os.path.exists(new))
+
 
 # ── on_deleted mount check ───────────────────────────────────────────
 
@@ -157,7 +214,7 @@ class TestOnDeletedMountCheck(SafetyTestBase):
         event.is_directory = False
         event.src_path = os.path.join(self.source_dir, 'movie.mkv')
 
-        # Source dir is empty → mount unhealthy
+        # Source dir is empty -> mount unhealthy
         with patch.object(monitor, 'delete_encoded_video') as mock_del:
             handler.on_deleted(event)
             mock_del.assert_not_called()
@@ -173,6 +230,22 @@ class TestOnDeletedMountCheck(SafetyTestBase):
         with patch.object(monitor, 'delete_encoded_video') as mock_del:
             handler.on_deleted(event)
             mock_del.assert_called_once_with(event.src_path)
+
+    def test_rate_limits_burst_deletes(self):
+        """Burst of deletes beyond limit must be suppressed."""
+        handler = monitor.VideoHandler()
+        self._touch(self.source_dir, 'anchor.mkv')
+
+        calls = 0
+        with patch.object(monitor, 'delete_encoded_video') as mock_del:
+            for i in range(monitor._DELETE_BURST_LIMIT + 20):
+                event = MagicMock()
+                event.is_directory = False
+                event.src_path = os.path.join(self.source_dir, f'movie{i}.mkv')
+                handler.on_deleted(event)
+            calls = mock_del.call_count
+
+        self.assertEqual(calls, monitor._DELETE_BURST_LIMIT)
 
 
 if __name__ == '__main__':

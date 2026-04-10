@@ -14,7 +14,22 @@ env:
   IMAGE_NAME: drumsergio/jellyfin-encoder
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install watchdog==6.0.0
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,6 +38,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
