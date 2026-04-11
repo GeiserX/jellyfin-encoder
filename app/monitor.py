@@ -15,8 +15,8 @@ HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()  # nvidia, in
 ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()  # LOW, MEDIUM, HIGH
 ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower()  # hevc or av1
 
-SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', 'F:\\Series')
-DEST_FOLDER = os.getenv('DEST_FOLDER', 'G:\\Series')
+SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', '/app/source')
+DEST_FOLDER = os.getenv('DEST_FOLDER', '/app/destination')
 
 # Symlink settings for Jellyfin multi-version support
 # SYMLINK_TARGET_PREFIX: The path prefix for symlink targets AS SEEN BY THE SOURCE HOST
@@ -61,6 +61,8 @@ _DELETE_BURST_WINDOW = 60  # seconds
 _delete_event_times = []
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
+             f'CODEC={ENCODING_CODEC}, QUALITY={ENCODING_QUALITY}, HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}')
 
 
 class VideoHandler(FileSystemEventHandler):
