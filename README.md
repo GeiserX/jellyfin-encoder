@@ -11,6 +11,7 @@
   <a href="https://hub.docker.com/r/drumsergio/jellyfin-encoder"><img src="https://img.shields.io/docker/pulls/drumsergio/jellyfin-encoder?style=flat-square" alt="Docker Pulls"></a>
   <a href="https://github.com/GeiserX/jellyfin-encoder/releases"><img src="https://img.shields.io/github/v/release/GeiserX/jellyfin-encoder?style=flat-square" alt="GitHub Release"></a>
   <a href="https://hub.docker.com/r/drumsergio/jellyfin-encoder"><img src="https://img.shields.io/docker/image-size/drumsergio/jellyfin-encoder/latest?style=flat-square&label=image%20size" alt="Docker Image Size"></a>
+  <a href="https://codecov.io/gh/GeiserX/jellyfin-encoder"><img src="https://codecov.io/gh/GeiserX/jellyfin-encoder/graph/badge.svg" alt="codecov"></a>
 </p>
 
 ---
