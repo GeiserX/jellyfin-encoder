@@ -26,10 +26,102 @@ DEST_FOLDER = os.getenv('DEST_FOLDER', '/app/destination')
 SYMLINK_TARGET_PREFIX = os.getenv('SYMLINK_TARGET_PREFIX', '')  # e.g., '/mnt/remotes/GEISERBACK_ShareMedia/Peliculas'
 SYMLINK_VERSION_SUFFIX = os.getenv('SYMLINK_VERSION_SUFFIX', ' - 720p')  # Version suffix for symlinks
 
+# Manifest-based symlink management for cross-host setups.
+# When set, the encoder writes a .symlink-manifest.json to DEST_FOLDER listing
+# all encoded files and their Jellyfin container target paths.
+# A lightweight script on the Jellyfin host reads this manifest and creates real symlinks.
+# Example: '/media-720/Peliculas' (path prefix as seen inside the Jellyfin container)
+SYMLINK_MANIFEST_TARGET = os.getenv('SYMLINK_MANIFEST_TARGET', '')
+
 # Quality suffixes to detect and replace in filenames (for same-folder multi-version)
 QUALITY_SUFFIXES = [' - 4K', ' - 2160p', ' - 1080p', ' - 720p', ' - 480p', ' - SD', ' - HDR', ' - REMUX', ' - Remux']
 
 import re
+
+
+# ── Manifest-based symlink helpers ──────────────────────────────────────────
+
+def _get_manifest_path():
+    """Path to the symlink manifest in DEST_FOLDER."""
+    return os.path.join(DEST_FOLDER, '.symlink-manifest.json')
+
+
+def _read_manifest():
+    """Read current symlink manifest, returning the symlinks dict."""
+    try:
+        with open(_get_manifest_path(), 'r') as f:
+            data = json.load(f)
+            return data.get('symlinks', {})
+    except (IOError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _write_manifest(symlinks):
+    """Atomically write the symlink manifest."""
+    path = _get_manifest_path()
+    tmp = path + '.tmp'
+    data = {'version': 1, 'symlinks': symlinks}
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _manifest_add(encoded_rel_path):
+    """Add an encoded file to the symlink manifest."""
+    if not SYMLINK_MANIFEST_TARGET:
+        return
+    target = os.path.join(SYMLINK_MANIFEST_TARGET, encoded_rel_path)
+    manifest = _read_manifest()
+    if manifest.get(encoded_rel_path) == target:
+        return  # Already up to date
+    manifest[encoded_rel_path] = target
+    _write_manifest(manifest)
+    logging.info(f'Manifest: added {encoded_rel_path}')
+
+
+def _manifest_remove(encoded_rel_path):
+    """Remove an encoded file from the symlink manifest."""
+    if not SYMLINK_MANIFEST_TARGET:
+        return
+    manifest = _read_manifest()
+    if encoded_rel_path in manifest:
+        del manifest[encoded_rel_path]
+        _write_manifest(manifest)
+        logging.info(f'Manifest: removed {encoded_rel_path}')
+
+
+def _manifest_reconcile():
+    """Remove manifest entries whose encoded files no longer exist."""
+    if not SYMLINK_MANIFEST_TARGET:
+        return
+    manifest = _read_manifest()
+    to_remove = [
+        rel_path for rel_path in manifest
+        if not os.path.exists(os.path.join(DEST_FOLDER, rel_path))
+    ]
+    if to_remove:
+        for key in to_remove:
+            del manifest[key]
+            logging.info(f'Manifest: removed orphaned entry {key}')
+        _write_manifest(manifest)
+
+
+def _manifest_full_sync():
+    """Rebuild manifest from current DEST_FOLDER state (startup)."""
+    if not SYMLINK_MANIFEST_TARGET:
+        return
+    manifest = {}
+    for root, _, files in os.walk(DEST_FOLDER):
+        for file in files:
+            if not file.endswith('.mkv') or file.endswith('.tmp'):
+                continue
+            full_path = os.path.join(root, file)
+            rel_path = os.path.relpath(full_path, DEST_FOLDER)
+            manifest[rel_path] = os.path.join(SYMLINK_MANIFEST_TARGET, rel_path)
+    _write_manifest(manifest)
+    logging.info(f'Manifest: full sync complete, {len(manifest)} entries')
+
+
 def get_version_output_name(source_name):
     """
     Generate output filename for multi-version support.
@@ -63,7 +155,8 @@ _delete_event_times = []
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
-             f'CODEC={ENCODING_CODEC}, QUALITY={ENCODING_QUALITY}, HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}')
+             f'CODEC={ENCODING_CODEC}, QUALITY={ENCODING_QUALITY}, HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
+             f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}')
 
 
 class VideoHandler(FileSystemEventHandler):
@@ -355,6 +448,7 @@ def encode_video(source_path, processed_files, processing_files):
             processed_files[dest_file_final] = True
             # Ensure version symlink exists even for previously encoded files
             create_version_symlink(source_path, dest_file_final)
+            _manifest_add(os.path.relpath(dest_file_final, DEST_FOLDER))
             return
         elif os.path.exists(dest_file_final):
             os.remove(dest_file_final)
@@ -476,6 +570,7 @@ def encode_video(source_path, processed_files, processing_files):
                 
                 # Create version symlink for Jellyfin multi-version support
                 create_version_symlink(source_path, dest_file_final)
+                _manifest_add(os.path.relpath(dest_file_final, DEST_FOLDER))
             else:
                 logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
                 os.remove(dest_file_temp)
@@ -565,9 +660,10 @@ def delete_encoded_video(source_path):
         if os.path.exists(f):
             os.remove(f)
             logging.info(f'Deleted: {f}')
-    
+
     # Also delete the version symlink if applicable
     delete_version_symlink(source_path)
+    _manifest_remove(os.path.relpath(encoded_file, DEST_FOLDER))
 
 
 def scan_source_directory():
@@ -728,6 +824,7 @@ def cleanup_destination():
 
     # Cleanup succeeded — persist source count for future comparison.
     _write_source_count(source_count)
+    _manifest_reconcile()
     logging.info(f'Cleanup complete. Persisted source count: {source_count}')
 
 
@@ -816,6 +913,7 @@ if __name__ == "__main__":
         logging.critical(f'DEST_FOLDER "{DEST_FOLDER}" does not exist or is not a directory. Exiting.')
         sys.exit(1)
 
+    _manifest_full_sync()
     cleanup_destination()
     cleanup_orphaned_symlinks()
     event_handler = VideoHandler()
