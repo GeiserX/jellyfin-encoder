@@ -26,9 +26,15 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install watchdog==6.0.0 pytest
+        run: pip install watchdog==6.0.0 pytest pytest-cov
       - name: Run tests
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -v --cov --cov-report=xml
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '' || true
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
 
   build:
     needs: test
