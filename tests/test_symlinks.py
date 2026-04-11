@@ -61,12 +61,13 @@ class TestCreateVersionSymlink(SymlinkTestBase):
         target = os.readlink(result)
         self.assertTrue(target.startswith(self.dest_dir))
 
-    def test_replaces_existing_symlink(self):
+    def test_replaces_existing_symlink_and_updates_target(self):
         source = self._touch(self.source_dir, 'Movie.mkv')
         dest1 = self._touch(self.dest_dir, 'Movie - 720p.mkv')
 
         symlink1 = monitor.create_version_symlink(source, dest1)
         self.assertIsNotNone(symlink1)
+        target1 = os.readlink(symlink1)
 
         # Create a new dest and re-symlink
         dest2 = self._touch(self.dest_dir, 'Movie - 720p_v2.mkv')
@@ -74,6 +75,9 @@ class TestCreateVersionSymlink(SymlinkTestBase):
 
         self.assertEqual(symlink1, symlink2)
         self.assertTrue(os.path.islink(symlink2))
+        target2 = os.readlink(symlink2)
+        self.assertNotEqual(target1, target2)
+        self.assertIn('720p_v2', target2)
 
     def test_skips_non_symlink_existing_file(self):
         source = self._touch(self.source_dir, 'Movie.mkv')
@@ -195,6 +199,53 @@ class TestCleanupOrphanedSymlinks(SymlinkTestBase):
             source = self._touch(self.source_dir, 'Movie.mkv')
             # Should not raise
             monitor.cleanup_orphaned_symlinks()
+
+    def test_cross_host_path_remap(self):
+        """Cleanup must resolve symlink targets through a different prefix than DEST_FOLDER."""
+        # Simulate cross-host: symlinks point to /remote/mount/... but actual
+        # files live in DEST_FOLDER. SYMLINK_TARGET_PREFIX maps between them.
+        remote_prefix = os.path.join(tempfile.mkdtemp(prefix='encoder_remote_'), 'movies')
+        os.makedirs(remote_prefix, exist_ok=True)
+
+        with patch.object(monitor, 'SYMLINK_TARGET_PREFIX', remote_prefix):
+            source = self._touch(self.source_dir, 'Movie.mkv')
+            dest = self._touch(self.dest_dir, 'Movie - 720p.mkv')
+            symlink = monitor.create_version_symlink(source, dest)
+
+            # Symlink target should use the remote prefix, not dest_dir
+            target = os.readlink(symlink)
+            self.assertTrue(target.startswith(remote_prefix))
+
+            # Cleanup should resolve target -> DEST_FOLDER and find the file
+            monitor.cleanup_orphaned_symlinks()
+            self.assertTrue(os.path.islink(symlink), "Valid symlink was wrongly removed")
+
+            # Now delete the dest file — cleanup should remove the orphan
+            os.remove(dest)
+            monitor.cleanup_orphaned_symlinks()
+            self.assertFalse(os.path.exists(symlink), "Orphaned symlink was not removed")
+
+        shutil.rmtree(os.path.dirname(remote_prefix), ignore_errors=True)
+
+
+class TestDeleteEncodedVideoIntegration(SymlinkTestBase):
+
+    def test_deletes_encode_and_symlink_together(self):
+        """delete_encoded_video should remove both the encoded file and its symlink."""
+        source = self._touch(self.source_dir, 'Movie - 1080p.mkv')
+        dest = self._touch(self.dest_dir, 'Movie - 720p.mkv')
+
+        # Create the symlink as encode_video would
+        symlink = monitor.create_version_symlink(source, dest)
+        self.assertIsNotNone(symlink)
+        self.assertTrue(os.path.islink(symlink))
+        self.assertTrue(os.path.exists(dest))
+
+        # Simulate source deletion triggering cleanup
+        monitor.delete_encoded_video(source)
+
+        self.assertFalse(os.path.exists(dest), "Encoded file was not deleted")
+        self.assertFalse(os.path.exists(symlink), "Version symlink was not deleted")
 
 
 if __name__ == '__main__':
