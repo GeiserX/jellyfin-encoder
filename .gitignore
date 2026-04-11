@@ -173,5 +173,10 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+# Encoder runtime files
+.symlink-manifest.json
+.symlink-manifest.lock
+.encoder_source_count
+
 # OMC local state
 .omc/
