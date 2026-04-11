@@ -2,13 +2,14 @@ import time
 import os
 import sys
 import logging
+import fcntl
 
 import subprocess
 import concurrent.futures
 from multiprocessing import Manager, freeze_support
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
-import json  # Added import for json module
+import json
 
 # Env variables
 ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
@@ -46,6 +47,37 @@ def _get_manifest_path():
     return os.path.join(DEST_FOLDER, '.symlink-manifest.json')
 
 
+def _get_manifest_lock_path():
+    """Path to the manifest lock file."""
+    return os.path.join(DEST_FOLDER, '.symlink-manifest.lock')
+
+
+def _locked_manifest_update(update_fn):
+    """Execute update_fn(manifest) -> manifest under an exclusive file lock.
+
+    Prevents concurrent read-modify-write races between the main process
+    and encode/delete callbacks.
+    """
+    lock_path = _get_manifest_lock_path()
+    manifest_path = _get_manifest_path()
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, 'w') as lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            with open(manifest_path, 'r') as f:
+                data = json.load(f)
+                manifest = data.get('symlinks', {})
+        except (IOError, json.JSONDecodeError, OSError):
+            manifest = {}
+        updated = update_fn(manifest)
+        if updated is not None:
+            tmp = manifest_path + '.tmp'
+            data = {'version': 1, 'symlinks': updated}
+            with open(tmp, 'w') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, manifest_path)
+
+
 def _read_manifest():
     """Read current symlink manifest, returning the symlinks dict."""
     try:
@@ -57,7 +89,7 @@ def _read_manifest():
 
 
 def _write_manifest(symlinks):
-    """Atomically write the symlink manifest."""
+    """Atomically write the symlink manifest (used only by full_sync)."""
     path = _get_manifest_path()
     tmp = path + '.tmp'
     data = {'version': 1, 'symlinks': symlinks}
@@ -71,39 +103,50 @@ def _manifest_add(encoded_rel_path):
     if not SYMLINK_MANIFEST_TARGET:
         return
     target = os.path.join(SYMLINK_MANIFEST_TARGET, encoded_rel_path)
-    manifest = _read_manifest()
-    if manifest.get(encoded_rel_path) == target:
-        return  # Already up to date
-    manifest[encoded_rel_path] = target
-    _write_manifest(manifest)
-    logging.info(f'Manifest: added {encoded_rel_path}')
+
+    def _update(manifest):
+        if manifest.get(encoded_rel_path) == target:
+            return None  # No change needed
+        manifest[encoded_rel_path] = target
+        logging.info(f'Manifest: added {encoded_rel_path}')
+        return manifest
+
+    _locked_manifest_update(_update)
 
 
 def _manifest_remove(encoded_rel_path):
     """Remove an encoded file from the symlink manifest."""
     if not SYMLINK_MANIFEST_TARGET:
         return
-    manifest = _read_manifest()
-    if encoded_rel_path in manifest:
-        del manifest[encoded_rel_path]
-        _write_manifest(manifest)
-        logging.info(f'Manifest: removed {encoded_rel_path}')
+
+    def _update(manifest):
+        if encoded_rel_path in manifest:
+            del manifest[encoded_rel_path]
+            logging.info(f'Manifest: removed {encoded_rel_path}')
+            return manifest
+        return None
+
+    _locked_manifest_update(_update)
 
 
 def _manifest_reconcile():
     """Remove manifest entries whose encoded files no longer exist."""
     if not SYMLINK_MANIFEST_TARGET:
         return
-    manifest = _read_manifest()
-    to_remove = [
-        rel_path for rel_path in manifest
-        if not os.path.exists(os.path.join(DEST_FOLDER, rel_path))
-    ]
-    if to_remove:
+
+    def _update(manifest):
+        to_remove = [
+            rel_path for rel_path in manifest
+            if not os.path.exists(os.path.join(DEST_FOLDER, rel_path))
+        ]
+        if not to_remove:
+            return None
         for key in to_remove:
             del manifest[key]
             logging.info(f'Manifest: removed orphaned entry {key}')
-        _write_manifest(manifest)
+        return manifest
+
+    _locked_manifest_update(_update)
 
 
 def _manifest_full_sync():

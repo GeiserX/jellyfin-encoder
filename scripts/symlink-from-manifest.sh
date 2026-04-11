@@ -54,6 +54,21 @@ except (IOError, json.JSONDecodeError) as e:
 
 desired = data.get("symlinks", {})
 
+# Validate manifest entries: reject paths that escape the media root
+safe_desired = {}
+media_dir_real = os.path.realpath(media_dir)
+for rel_path, target in desired.items():
+    normalized = os.path.normpath(rel_path)
+    if normalized.startswith("..") or os.path.isabs(normalized):
+        print(f"WARNING: Skipping unsafe manifest path: {rel_path}", file=sys.stderr)
+        continue
+    resolved = os.path.realpath(os.path.join(media_dir, normalized))
+    if not resolved.startswith(media_dir_real + os.sep) and resolved != media_dir_real:
+        print(f"WARNING: Skipping path escaping media root: {rel_path}", file=sys.stderr)
+        continue
+    safe_desired[rel_path] = target
+desired = safe_desired
+
 # Pass 1: Create/update symlinks from manifest
 created = 0
 for rel_path, target in desired.items():
