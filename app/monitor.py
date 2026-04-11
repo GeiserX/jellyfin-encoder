@@ -1,5 +1,6 @@
 import time
 import os
+import sys
 import logging
 
 import subprocess
@@ -806,6 +807,14 @@ if __name__ == "__main__":
     max_workers = 1 if ENABLE_HW_ACCEL else (os.cpu_count() or 1)
     logging.info(f'Running with {max_workers} workers')
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
+
+    # Preflight: exit cleanly if SOURCE_FOLDER is not a valid directory
+    if not os.path.isdir(SOURCE_FOLDER):
+        logging.critical(f'SOURCE_FOLDER "{SOURCE_FOLDER}" does not exist or is not a directory. Exiting.')
+        sys.exit(1)
+    if not os.path.isdir(DEST_FOLDER):
+        logging.critical(f'DEST_FOLDER "{DEST_FOLDER}" does not exist or is not a directory. Exiting.')
+        sys.exit(1)
 
     cleanup_destination()
     cleanup_orphaned_symlinks()

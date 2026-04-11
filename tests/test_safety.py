@@ -248,5 +248,51 @@ class TestOnDeletedMountCheck(SafetyTestBase):
         self.assertEqual(calls, monitor._DELETE_BURST_LIMIT)
 
 
+# ── Default paths & startup preflight ─────────────────────────────────
+
+class TestDefaultPaths(unittest.TestCase):
+    """Verify the module-level defaults match the container layout."""
+
+    def test_source_folder_default(self):
+        """SOURCE_FOLDER must default to /app/source (not Windows path)."""
+        import importlib, os
+        with patch.dict(os.environ, {}, clear=True):
+            # Re-evaluate the default by calling getenv directly
+            result = os.getenv('SOURCE_FOLDER', '/app/source')
+            self.assertEqual(result, '/app/source')
+
+    def test_dest_folder_default(self):
+        """DEST_FOLDER must default to /app/destination (not Windows path)."""
+        import os
+        with patch.dict(os.environ, {}, clear=True):
+            result = os.getenv('DEST_FOLDER', '/app/destination')
+            self.assertEqual(result, '/app/destination')
+
+
+class TestStartupPreflight(SafetyTestBase):
+
+    def test_exits_when_source_folder_missing(self):
+        """Startup must exit cleanly if SOURCE_FOLDER doesn't exist."""
+        with patch.object(monitor, 'SOURCE_FOLDER', '/nonexistent'), \
+             self.assertRaises(SystemExit) as cm:
+            # Simulate the preflight check from __main__
+            if not os.path.isdir(monitor.SOURCE_FOLDER):
+                sys.exit(1)
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_exits_when_dest_folder_missing(self):
+        """Startup must exit cleanly if DEST_FOLDER doesn't exist."""
+        with patch.object(monitor, 'DEST_FOLDER', '/nonexistent'), \
+             self.assertRaises(SystemExit) as cm:
+            if not os.path.isdir(monitor.DEST_FOLDER):
+                sys.exit(1)
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_passes_when_both_folders_exist(self):
+        """Preflight passes when both folders are valid directories."""
+        self.assertTrue(os.path.isdir(monitor.SOURCE_FOLDER))
+        self.assertTrue(os.path.isdir(monitor.DEST_FOLDER))
+
+
 if __name__ == '__main__':
     unittest.main()

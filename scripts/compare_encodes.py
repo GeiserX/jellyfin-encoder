@@ -504,14 +504,14 @@ Examples:
     parser.add_argument(
         "-s", "--source",
         type=Path,
-        default=os.getenv("SOURCE_FOLDER"),
+        default=os.getenv("SOURCE_FOLDER", "/app/source"),
         help="Source folder with original videos (or set SOURCE_FOLDER env var)"
     )
-    
+
     parser.add_argument(
         "-d", "--dest",
         type=Path,
-        default=os.getenv("DEST_FOLDER"),
+        default=os.getenv("DEST_FOLDER", "/app/destination"),
         help="Destination folder with encoded videos (or set DEST_FOLDER env var)"
     )
     
