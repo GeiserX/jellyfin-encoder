@@ -37,7 +37,7 @@
 ```yaml
 services:
   jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.1.4
+    image: drumsergio/jellyfin-encoder:1.1.5
     container_name: jellyfin-encoder
     devices:
       - /dev/dri:/dev/dri  # Intel QSV -- remove if using NVIDIA or software encoding
@@ -72,7 +72,7 @@ docker run -d \
   -e ENCODING_CODEC=hevc \
   -e ENCODING_QUALITY=LOW \
   --restart always \
-  drumsergio/jellyfin-encoder:1.1.4
+  drumsergio/jellyfin-encoder:1.1.5
 ```
 
 ## Configuration
@@ -178,7 +178,7 @@ Set `SYMLINK_MANIFEST_TARGET` to the path prefix as seen **inside the Jellyfin c
 ```yaml
 services:
   jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.1.4
+    image: drumsergio/jellyfin-encoder:1.1.5
     environment:
       SYMLINK_MANIFEST_TARGET: "/media-720/Peliculas"  # Jellyfin container path
       # ...other settings
@@ -193,13 +193,15 @@ Install `scripts/symlink-from-manifest.sh` on the Jellyfin host and run it via c
 ```bash
 # Copy script to Jellyfin host
 cp scripts/symlink-from-manifest.sh /boot/config/symlink-from-manifest.sh
-chmod +x /boot/config/symlink-from-manifest.sh
 
 # Add cron (runs every 5 minutes)
-echo '*/5 * * * * /boot/config/symlink-from-manifest.sh' | crontab -
+# NOTE: Use /bin/bash explicitly — Unraid /boot is FAT32 and does not support chmod +x
+echo '*/5 * * * * /bin/bash /boot/config/symlink-from-manifest.sh' | crontab -
 ```
 
 Edit the script's configuration variables (`REMOTE_ROOT`, `MEDIA_ROOT`, `LIBRARIES`) to match your setup. The script creates symlinks in `MEDIA_ROOT` pointing to the Jellyfin container path from the manifest, and removes orphaned symlinks not present in the manifest.
+
+**Security**: The script validates all manifest entries — relative paths are checked against the media root to prevent path traversal, and symlink targets must start with the expected `/media-720/{library}` prefix to prevent arbitrary symlink creation from a compromised manifest.
 
 ### Manifest Format
 
@@ -315,9 +317,9 @@ STATUS: Issues found - 23 missing encodes, 20 orphaned files
 
 ## Other Jellyfin Projects by GeiserX
 
-- [quality-gate](https://github.com/GeiserX/quality-gate) — Restrict users to specific media versions based on filename regex patterns
+- [quality-gate](https://github.com/GeiserX/quality-gate) — Restrict users to specific media versions based on configurable path-based policies
 - [smart-covers](https://github.com/GeiserX/smart-covers) — Cover extraction for books, audiobooks, comics, magazines, and music libraries with online fallback
-- [whisper-subs](https://github.com/GeiserX/whisper-subs) — Automatically generates subtitles using local AI models powered by Whisper
+- [whisper-subs](https://github.com/GeiserX/whisper-subs) — Automatic subtitle generation using local AI models powered by whisper.cpp
 - [jellyfin-telegram-channel-sync](https://github.com/GeiserX/jellyfin-telegram-channel-sync) — Sync Jellyfin access with Telegram channel membership
 
 ## Related Music Pipeline Tools
