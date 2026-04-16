@@ -34,6 +34,9 @@ SYMLINK_VERSION_SUFFIX = os.getenv('SYMLINK_VERSION_SUFFIX', ' - 720p')  # Versi
 # Example: '/media-720/Peliculas' (path prefix as seen inside the Jellyfin container)
 SYMLINK_MANIFEST_TARGET = os.getenv('SYMLINK_MANIFEST_TARGET', '')
 
+# Skip encoding when a lower-quality version of the same media already exists in source
+SKIP_IF_LOW_QUALITY_EXISTS = os.getenv('SKIP_IF_LOW_QUALITY_EXISTS', 'true').lower() == 'true'
+
 # Quality suffixes to detect and replace in filenames (for same-folder multi-version)
 QUALITY_SUFFIXES = [' - 4K', ' - 2160p', ' - 1080p', ' - 720p', ' - 480p', ' - SD', ' - HDR', ' - REMUX', ' - Remux']
 
@@ -186,6 +189,60 @@ def get_version_output_name(source_name):
     # No quality suffix found - append version suffix
     return source_name + SYMLINK_VERSION_SUFFIX
 
+def strip_quality_suffix(name):
+    """Strip known quality suffixes from a filename stem to get the base name."""
+    name_lower = name.lower()
+    for suffix in QUALITY_SUFFIXES:
+        if name_lower.endswith(suffix.lower()):
+            return name[:-len(suffix)]
+    return name
+
+
+def has_low_quality_sibling(source_path):
+    """
+    Check if a lower-quality version of the same media already exists
+    in the source directory (e.g., 'Episode A - 720p.mkv' next to
+    'Episode A - 1080p.mkv'). If so, encoding is unnecessary.
+    """
+    vid_ext = ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.mpeg', '.mpg', '.webm')
+    source_dir = os.path.dirname(source_path)
+    source_basename = os.path.basename(source_path)
+    source_stem, _ = os.path.splitext(source_basename)
+    source_base = strip_quality_suffix(source_stem)
+
+    try:
+        siblings = os.listdir(source_dir)
+    except OSError:
+        return False
+
+    for sibling in siblings:
+        if sibling == source_basename:
+            continue
+        if not sibling.lower().endswith(vid_ext):
+            continue
+        # Skip symlinks created by this tool
+        sibling_path = os.path.join(source_dir, sibling)
+        if not os.path.isfile(sibling_path):
+            continue
+        if os.path.islink(sibling_path):
+            continue
+
+        sibling_stem, _ = os.path.splitext(sibling)
+        sibling_base = strip_quality_suffix(sibling_stem)
+
+        if sibling_base != source_base:
+            continue
+
+        # Same base name — check if the sibling is low quality
+        if is_already_low_quality(sibling_path):
+            logging.info(
+                f'Skipping encode: low-quality sibling already exists '
+                f'("{sibling}" next to "{source_basename}")')
+            return True
+
+    return False
+
+
 TIMEOUT = 86400
 MAX_SAME_SIZE_COUNT = 60
 
@@ -199,7 +256,8 @@ _delete_event_times = []
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
              f'CODEC={ENCODING_CODEC}, QUALITY={ENCODING_QUALITY}, HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
-             f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}')
+             f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}, '
+             f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}')
 
 
 class VideoHandler(FileSystemEventHandler):
@@ -444,7 +502,11 @@ def encode_video(source_path, processed_files, processing_files):
     if is_already_low_quality(source_path):
         logging.info(f'Skipping low quality file (already 720p or lower): {source_path}')
         return
-    
+
+    # Skip if a lower-quality sibling of the same media already exists in source
+    if SKIP_IF_LOW_QUALITY_EXISTS and has_low_quality_sibling(source_path):
+        return
+
     # Log metadata if available (for debugging/verification)
     metadata = get_metadata_info(source_path)
     if metadata:
