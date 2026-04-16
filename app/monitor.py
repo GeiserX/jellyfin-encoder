@@ -191,8 +191,9 @@ def get_version_output_name(source_name):
 
 def strip_quality_suffix(name):
     """Strip known quality suffixes from a filename stem to get the base name."""
+    name_lower = name.lower()
     for suffix in QUALITY_SUFFIXES:
-        if name.endswith(suffix):
+        if name_lower.endswith(suffix.lower()):
             return name[:-len(suffix)]
     return name
 
@@ -221,6 +222,8 @@ def has_low_quality_sibling(source_path):
             continue
         # Skip symlinks created by this tool
         sibling_path = os.path.join(source_dir, sibling)
+        if not os.path.isfile(sibling_path):
+            continue
         if os.path.islink(sibling_path):
             continue
 
