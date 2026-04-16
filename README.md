@@ -338,14 +338,6 @@ Contributions are welcome. Please open an issue to discuss proposed changes befo
 4. Open a pull request against `main`
 
 
-## Related Projects
-
-| Project | Description |
-|---------|-------------|
-| [jellyfin-telegram-channel-sync](https://github.com/GeiserX/jellyfin-telegram-channel-sync) | Sync Jellyfin user access with Telegram channel membership |
-| [smart-covers](https://github.com/GeiserX/smart-covers) | Jellyfin plugin for fallback cover extraction from PDF, EPUB, and audiobook files |
-| [whisper-subs](https://github.com/GeiserX/whisper-subs) | Jellyfin plugin for local AI-powered subtitle generation using Whisper |
-
 ## License
 
 This project is licensed under the [GPL-3.0 License](LICENSE).
