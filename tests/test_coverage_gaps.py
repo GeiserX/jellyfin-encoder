@@ -333,9 +333,15 @@ class TestWaitForFileCompletion(TempDirTestBase):
             # Size keeps changing so same_size_count never reaches threshold
             return call_count[0]
 
+        time_calls = [0]
+        def mock_time():
+            time_calls[0] += 1
+            # First two calls return 0 (start + first check), then jump past timeout
+            return 0 if time_calls[0] <= 2 else 100000
+
         with patch('time.sleep'), \
              patch('os.path.getsize', side_effect=mock_getsize), \
-             patch('time.time', side_effect=[0, 0, 0, 100000]):
+             patch('time.time', side_effect=mock_time):
             result = monitor.wait_for_file_completion(f, timeout=1)
         self.assertFalse(result)
 
