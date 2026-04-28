@@ -1,4 +1,4 @@
-# AGENTS.md — Jellyfin Encoder
+# CLAUDE.md — Jellyfin Encoder
 
 ## Project Overview
 
