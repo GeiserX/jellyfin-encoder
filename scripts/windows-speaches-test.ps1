@@ -14,8 +14,12 @@ Write-Host "Testing Speaches API at $uri ..." -ForegroundColor Cyan
 try {
     $response = Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec 10
     Write-Host "`nSpeaches is running. Available models:" -ForegroundColor Green
-    $response.data | ForEach-Object {
-        Write-Host "  - $($_.id)" -ForegroundColor White
+    if ($response.data -and $response.data.Count -gt 0) {
+        $response.data | ForEach-Object {
+            Write-Host "  - $($_.id)" -ForegroundColor White
+        }
+    } else {
+        Write-Host "  No models loaded yet (first request may trigger download)." -ForegroundColor Yellow
     }
 } catch {
     Write-Host "`nFAILED: Speaches is not responding." -ForegroundColor Red

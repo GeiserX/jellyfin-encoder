@@ -42,7 +42,7 @@ curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-contai
   sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker
-sudo service docker restart
+sudo systemctl restart docker
 
 echo ">>> Creating Speaches deployment..."
 sudo mkdir -p /opt/speaches
@@ -76,11 +76,12 @@ COMPOSE
 echo ">>> Configuring wsl.conf for auto-start..."
 sudo tee /etc/wsl.conf > /dev/null <<'WSLCONF'
 [boot]
-command = service docker start && cd /opt/speaches && docker compose up -d
+command = systemctl start docker && sleep 5 && cd /opt/speaches && docker compose up -d
 WSLCONF
 
 echo ">>> Pulling image and starting service..."
-sudo service docker start
+sudo systemctl start docker
+sleep 5
 cd /opt/speaches
 sudo docker compose pull
 sudo docker compose up -d
@@ -100,7 +101,7 @@ Write-Host "`n[3/4] Creating scheduled task 'WSL-Speaches'..." -ForegroundColor 
 
 $taskAction = New-ScheduledTaskAction `
     -Execute "wsl.exe" `
-    -Argument "-d Ubuntu-22.04 -- bash -c `"service docker start && cd /opt/speaches && docker compose up -d`""
+    -Argument "-d Ubuntu-22.04 -- bash -c `"systemctl start docker && sleep 5 && cd /opt/speaches && docker compose up -d`""
 
 $taskTrigger = New-ScheduledTaskTrigger -AtStartup
 $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable

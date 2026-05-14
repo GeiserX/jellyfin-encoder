@@ -1015,7 +1015,7 @@ if __name__ == "__main__":
     freeze_support()
     manager = Manager()
     processed_files, processing_files = manager.dict(), manager.dict()
-    max_workers = int(os.getenv('MAX_HW_WORKERS', '1')) if ENABLE_HW_ACCEL else (os.cpu_count() or 1)
+    max_workers = max(1, int(os.getenv('MAX_HW_WORKERS', '1') or '1')) if ENABLE_HW_ACCEL else (os.cpu_count() or 1)
     logging.info(f'Running with {max_workers} workers')
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
 

@@ -83,15 +83,20 @@ Write-Host "`n[4/8] Mapping SMB share..." -ForegroundColor Cyan
 
 $smbPath = "\\$SmbServer\$SmbShare"
 $driveMapping = "${DriveLetter}:"
-$existing = Get-SmbMapping 2>$null | Where-Object { $_.LocalPath -eq $driveMapping }
+$existing = Get-SmbGlobalMapping 2>$null | Where-Object { $_.RemotePath -eq $smbPath }
 
 if ($existing) {
-    Write-Host "  Drive $driveMapping already mapped to $($existing.RemotePath), skipping."
+    Write-Host "  Global mapping to $smbPath already exists, skipping."
 } else {
     Write-Host "  Enter credentials for $smbPath"
     $cred = Get-Credential -Message "SMB credentials for $smbPath"
-    New-SmbMapping -LocalPath $driveMapping -RemotePath $smbPath -UserName $cred.UserName -Password $cred.GetNetworkCredential().Password -Persistent $true
-    Write-Host "  Mapped $smbPath to $driveMapping (persistent)."
+    New-SmbGlobalMapping -RemotePath $smbPath -Credential $cred -Persistent $true
+    Write-Host "  Created global SMB mapping to $smbPath (accessible to SYSTEM)."
+}
+$existingDrive = Get-PSDrive -Name $DriveLetter -ErrorAction SilentlyContinue
+if (-not $existingDrive) {
+    New-PSDrive -Name $DriveLetter -PSProvider FileSystem -Root $smbPath -Persist -Scope Global | Out-Null
+    Write-Host "  Mapped drive $driveMapping to $smbPath."
 }
 
 # --- Step 5: Windows Defender exclusions ---
@@ -99,12 +104,12 @@ Write-Host "`n[5/8] Adding Windows Defender exclusions..." -ForegroundColor Cyan
 
 $pathExclusions = @(
     $WorkDir,
-    "\\$SmbServer\$SmbShare"
+    "$WorkDir\output"
 )
 
 $processExclusions = @(
-    "ffmpeg.exe",
-    "python.exe"
+    "$WorkDir\ffmpeg.exe",
+    "$WorkDir\python.exe"
 )
 
 foreach ($path in $pathExclusions) {
