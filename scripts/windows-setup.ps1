@@ -4,8 +4,14 @@
 
 #Requires -RunAsAdministrator
 
+param(
+    [string]$SmbServer = "YOUR_SERVER_IP",
+    [string]$SmbShare = "ShareMedia",
+    [string]$DriveLetter = "S",
+    [string]$WorkDir = "C:\jellyfin-encoder"
+)
+
 $ErrorActionPreference = "Stop"
-$WorkDir = "C:\jellyfin-encoder"
 $AppDir = "$WorkDir\app"
 $ScriptsDir = "$WorkDir\scripts"
 
@@ -46,8 +52,8 @@ HW_ENCODING_TYPE=nvidia
 ENCODING_QUALITY=LOW
 ENCODING_CODEC=hevc
 MAX_HW_WORKERS=2
-SOURCE_FOLDER=\\192.168.10.100\ShareMedia\Peliculas
-DEST_FOLDER=\\192.168.10.100\ShareMedia\Peliculas
+SOURCE_FOLDER=$${DriveLetter}:\Peliculas
+DEST_FOLDER=$WorkDir\output\Peliculas
 SYMLINK_MANIFEST_TARGET=/media-720/Peliculas
 SYMLINK_VERSION_SUFFIX= - 720p
 TZ=Europe/Madrid
@@ -59,8 +65,8 @@ HW_ENCODING_TYPE=nvidia
 ENCODING_QUALITY=LOW
 ENCODING_CODEC=hevc
 MAX_HW_WORKERS=2
-SOURCE_FOLDER=\\192.168.10.100\ShareMedia\Series
-DEST_FOLDER=\\192.168.10.100\ShareMedia\Series
+SOURCE_FOLDER=$${DriveLetter}:\Series
+DEST_FOLDER=$WorkDir\output\Series
 SYMLINK_MANIFEST_TARGET=/media-720/Series
 SYMLINK_VERSION_SUFFIX= - 720p
 TZ=Europe/Madrid
@@ -75,16 +81,17 @@ Write-Host "  Written $WorkDir\encoder-series.env"
 # --- Step 4: Map SMB drive ---
 Write-Host "`n[4/8] Mapping SMB share..." -ForegroundColor Cyan
 
-$smbPath = "\\192.168.10.100\ShareMedia"
-$existing = Get-SmbMapping 2>$null | Where-Object { $_.RemotePath -eq $smbPath }
+$smbPath = "\\$SmbServer\$SmbShare"
+$driveMapping = "${DriveLetter}:"
+$existing = Get-SmbMapping 2>$null | Where-Object { $_.LocalPath -eq $driveMapping }
 
 if ($existing) {
-    Write-Host "  SMB mapping to $smbPath already exists on drive $($existing.LocalPath), skipping."
+    Write-Host "  Drive $driveMapping already mapped to $($existing.RemotePath), skipping."
 } else {
     Write-Host "  Enter credentials for $smbPath"
     $cred = Get-Credential -Message "SMB credentials for $smbPath"
-    New-SmbMapping -RemotePath $smbPath -UserName $cred.UserName -Password $cred.GetNetworkCredential().Password -Persistent $true
-    Write-Host "  Mapped $smbPath (persistent)."
+    New-SmbMapping -LocalPath $driveMapping -RemotePath $smbPath -UserName $cred.UserName -Password $cred.GetNetworkCredential().Password -Persistent $true
+    Write-Host "  Mapped $smbPath to $driveMapping (persistent)."
 }
 
 # --- Step 5: Windows Defender exclusions ---
@@ -92,7 +99,7 @@ Write-Host "`n[5/8] Adding Windows Defender exclusions..." -ForegroundColor Cyan
 
 $pathExclusions = @(
     $WorkDir,
-    "\\192.168.10.100\ShareMedia"
+    "\\$SmbServer\$SmbShare"
 )
 
 $processExclusions = @(

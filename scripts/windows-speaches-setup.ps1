@@ -9,7 +9,7 @@
 .NOTES
     Prerequisites:
     - Windows 11 Pro with NVIDIA driver installed on host
-    - RTX 4070 Ti (12GB VRAM)
+    - NVIDIA GPU with CUDA support
     - Run as Administrator
 #>
 
@@ -50,7 +50,7 @@ sudo mkdir -p /opt/speaches
 sudo tee /opt/speaches/docker-compose.yml > /dev/null <<'COMPOSE'
 services:
   speaches:
-    image: ghcr.io/speaches-ai/speaches:latest-cuda
+    image: ghcr.io/speaches-ai/speaches:v0.9.0-cuda
     container_name: speaches
     restart: unless-stopped
     ports:
@@ -121,5 +121,5 @@ Write-Host "`n[4/4] Verifying GPU passthrough..." -ForegroundColor Yellow
 wsl -d Ubuntu-22.04 -- docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
 
 Write-Host "`n=== Setup Complete ===" -ForegroundColor Cyan
-Write-Host "Speaches is running at http://192.168.10.2:8000" -ForegroundColor Green
+Write-Host "Speaches is running at http://localhost:8000" -ForegroundColor Green
 Write-Host "Test with: Invoke-RestMethod -Uri 'http://localhost:8000/v1/models'" -ForegroundColor Green
