@@ -101,4 +101,3 @@ jobs:
           git push origin "v${{ steps.version.outputs.version }}" || echo "Tag already exists, skipping"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
