@@ -2,7 +2,11 @@ import time
 import os
 import sys
 import logging
-import fcntl
+import platform
+if platform.system() != 'Windows':
+    import fcntl
+else:
+    import msvcrt
 
 import subprocess
 import concurrent.futures
@@ -59,13 +63,16 @@ def _locked_manifest_update(update_fn):
     """Execute update_fn(manifest) -> manifest under an exclusive file lock.
 
     Prevents concurrent read-modify-write races between the main process
-    and encode/delete callbacks.
+    and encode/delete callbacks. Works on both Linux (fcntl) and Windows (msvcrt).
     """
     lock_path = _get_manifest_lock_path()
     manifest_path = _get_manifest_path()
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     with open(lock_path, 'w') as lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if platform.system() != 'Windows':
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        else:
+            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
         try:
             with open(manifest_path, 'r') as f:
                 data = json.load(f)
@@ -79,6 +86,8 @@ def _locked_manifest_update(update_fn):
             with open(tmp, 'w') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             os.replace(tmp, manifest_path)
+        if platform.system() == 'Windows':
+            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _read_manifest():
@@ -1006,7 +1015,7 @@ if __name__ == "__main__":
     freeze_support()
     manager = Manager()
     processed_files, processing_files = manager.dict(), manager.dict()
-    max_workers = 1 if ENABLE_HW_ACCEL else (os.cpu_count() or 1)
+    max_workers = int(os.getenv('MAX_HW_WORKERS', '1')) if ENABLE_HW_ACCEL else (os.cpu_count() or 1)
     logging.info(f'Running with {max_workers} workers')
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
 
