@@ -2,6 +2,8 @@ import time
 import os
 import sys
 import logging
+import logging.handlers
+import datetime
 import platform
 if platform.system() != 'Windows':
     import fcntl
@@ -23,6 +25,10 @@ ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower()  # hevc or av1
 
 SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', '/app/source')
 DEST_FOLDER = os.getenv('DEST_FOLDER', '/app/destination')
+DESTINATION_FOLDER_SAME_AS_SOURCE = os.getenv('DESTINATION_FOLDER_SAME_AS_SOURCE', 'false').lower() in ('true', '1')
+
+FFMPEG_BIN = os.getenv('FFMPEG_BIN', '/usr/lib/jellyfin-ffmpeg/ffmpeg')
+FFPROBE_BIN = os.getenv('FFPROBE_BIN', '/usr/lib/jellyfin-ffmpeg/ffprobe')
 
 # Symlink settings for Jellyfin multi-version support
 # SYMLINK_TARGET_PREFIX: The path prefix for symlink targets AS SEEN BY THE SOURCE HOST
@@ -263,10 +269,25 @@ _DELETE_BURST_WINDOW = 60  # seconds
 _delete_event_times = []
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+_LOG_DIR = os.getenv('ENCODER_LOG_DIR', '/var/log/jellyfin-encoder')
+try:
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    _file_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(_LOG_DIR, 'encoder.log'),
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+    )
+    _file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logging.getLogger().addHandler(_file_handler)
+except OSError as e:
+    logging.warning(f'Could not create log file in {_LOG_DIR}: {e}')
+
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
              f'CODEC={ENCODING_CODEC}, QUALITY={ENCODING_QUALITY}, HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
              f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}, '
-             f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}')
+             f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}, '
+             f'DESTINATION_FOLDER_SAME_AS_SOURCE={DESTINATION_FOLDER_SAME_AS_SOURCE}')
 
 
 class VideoHandler(FileSystemEventHandler):
@@ -308,7 +329,7 @@ class VideoHandler(FileSystemEventHandler):
 def get_video_resolution_from_ffprobe(filepath):
     """Get video resolution (height) using ffprobe."""
     try:
-        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        cmd = [FFPROBE_BIN, '-v', 'error', '-select_streams', 'v:0',
                '-show_entries', 'stream=height', '-of', 'csv=p=0', filepath]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode == 0 and result.stdout.strip():
@@ -322,7 +343,7 @@ def get_video_resolution_from_ffprobe(filepath):
 def get_metadata_info(filepath):
     """Extract metadata from video file (year, title, etc.)."""
     try:
-        cmd = ['ffprobe', '-v', 'error', '-show_entries',
+        cmd = [FFPROBE_BIN, '-v', 'error', '-show_entries',
                'format_tags=title,date,year,creation_time',
                '-of', 'json', filepath]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -434,7 +455,7 @@ def is_file_growing(file_path, check_interval=10):
     return size2 > size1
 
 def verify_encoded_file(file_path):
-    cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v', '-show_entries', 'format=duration',
+    cmd = [FFPROBE_BIN, '-v', 'error', '-select_streams', 'v', '-show_entries', 'format=duration',
            '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
     try:
         output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
@@ -447,7 +468,7 @@ def verify_encoded_file(file_path):
 
 def get_audio_streams(source_path):
     ffprobe_cmd = [
-        'ffprobe', '-v', 'error', '-select_streams', 'a',
+        FFPROBE_BIN, '-v', 'error', '-select_streams', 'a',
         '-show_entries', 'stream=index,codec_name', '-of', 'json', source_path
     ]
     ffprobe_process = subprocess.run(ffprobe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -472,7 +493,7 @@ def get_subtitle_streams(source_path):
         dict with 'copy' and 'convert' lists, each containing (stream_index, codec_name) tuples
     """
     ffprobe_cmd = [
-        'ffprobe', '-v', 'error', '-select_streams', 's',
+        FFPROBE_BIN, '-v', 'error', '-select_streams', 's',
         '-show_entries', 'stream=index,codec_name', '-of', 'json', source_path
     ]
     ffprobe_process = subprocess.run(ffprobe_cmd, stdout=subprocess.PIPE,
@@ -502,6 +523,55 @@ def get_subtitle_streams(source_path):
     
     return result
 
+
+FOLDER_ENCODE_LOG = 'jellyfin-encode.log'
+
+
+def _read_folder_log(folder):
+    """Return the set of source paths already recorded in this folder's encode log."""
+    log_path = os.path.join(folder, FOLDER_ENCODE_LOG)
+    processed = set()
+    try:
+        with open(log_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    src = entry.get('source')
+                    if src:
+                        processed.add(src)
+                except json.JSONDecodeError:
+                    pass
+    except (OSError, IOError):
+        pass
+    return processed
+
+
+def _write_folder_log(folder, source_path, dest_path, command):
+    """Append one JSON-Lines entry to the folder encode log (process-safe via flock)."""
+    log_path = os.path.join(folder, FOLDER_ENCODE_LOG)
+    entry = json.dumps({
+        'timestamp': datetime.datetime.now().isoformat(),
+        'source': source_path,
+        'dest': dest_path,
+        'codec': ENCODING_CODEC,
+        'quality': ENCODING_QUALITY,
+        'hw_accel': HW_ENCODING_TYPE if ENABLE_HW_ACCEL else 'disabled',
+        'ffmpeg_command': ' '.join(command),
+    }, ensure_ascii=False) + '\n'
+    try:
+        with open(log_path, 'a', encoding='utf-8') as f:
+            if platform.system() != 'Windows':
+                fcntl.flock(f, fcntl.LOCK_EX)
+            f.write(entry)
+            if platform.system() != 'Windows':
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except OSError as e:
+        logging.error(f'Failed to write folder encode log {log_path}: {e}')
+
+
 def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
         logging.info(f'Already processing: {source_path}')
@@ -516,6 +586,13 @@ def encode_video(source_path, processed_files, processing_files):
     if SKIP_IF_LOW_QUALITY_EXISTS and has_low_quality_sibling(source_path):
         return
 
+    # When destination is the same folder as source, the folder log is the
+    # persistent record of what has been encoded (survives container restarts).
+    if DESTINATION_FOLDER_SAME_AS_SOURCE:
+        if source_path in _read_folder_log(os.path.dirname(source_path)):
+            logging.info(f'Already encoded per folder log, skipping: {source_path}')
+            return
+
     # Log metadata if available (for debugging/verification)
     metadata = get_metadata_info(source_path)
     if metadata:
@@ -524,12 +601,15 @@ def encode_video(source_path, processed_files, processing_files):
     processing_files[source_path] = True
 
     try:
-        relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
-        dest_path = os.path.join(DEST_FOLDER, relative_path)
-        dest_dir = os.path.dirname(dest_path)
-        os.makedirs(dest_dir, exist_ok=True)
+        if DESTINATION_FOLDER_SAME_AS_SOURCE:
+            dest_dir = os.path.dirname(source_path)
+        else:
+            relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
+            dest_path = os.path.join(DEST_FOLDER, relative_path)
+            dest_dir = os.path.dirname(dest_path)
+            os.makedirs(dest_dir, exist_ok=True)
 
-        base_name = os.path.basename(dest_path)
+        base_name = os.path.basename(source_path)
         source_name, _ = os.path.splitext(base_name)
         
         # Always append version suffix (e.g., " - 720p") for Jellyfin multi-version detection
@@ -634,7 +714,7 @@ def encode_video(source_path, processed_files, processing_files):
 
         # Build the FFmpeg command
         command = [
-            'ffmpeg', '-loglevel', 'verbose', '-y',
+            FFMPEG_BIN, '-loglevel', 'verbose', '-y',
             '-analyzeduration', '100M', '-probesize', '100M',
             '-i', source_path,
             '-map', '0:v:0',
@@ -681,10 +761,13 @@ def encode_video(source_path, processed_files, processing_files):
                 os.rename(dest_file_temp, dest_file_final)
                 processed_files[dest_file_final] = True
                 logging.info(f'Encoding succeeded: {dest_file_final}')
-                
-                # Create version symlink for Jellyfin multi-version support
-                create_version_symlink(source_path, dest_file_final)
-                _manifest_add(os.path.relpath(dest_file_final, DEST_FOLDER))
+
+                if DESTINATION_FOLDER_SAME_AS_SOURCE:
+                    _write_folder_log(dest_dir, source_path, dest_file_final, command)
+                else:
+                    # Create version symlink for Jellyfin multi-version support
+                    create_version_symlink(source_path, dest_file_final)
+                    _manifest_add(os.path.relpath(dest_file_final, DEST_FOLDER))
             else:
                 logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
                 os.remove(dest_file_temp)
