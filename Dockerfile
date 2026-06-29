@@ -1,5 +1,5 @@
 # Use the linuxserver/ffmpeg image as the base image
-FROM lscr.io/linuxserver/ffmpeg:8.0.1
+FROM lscr.io/linuxserver/ffmpeg:8.1.2
 
 # Install Python and dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
