@@ -53,6 +53,7 @@ class EncodeTestBase(unittest.TestCase):
     def _managers(self):
         from multiprocessing import Manager
         mgr = Manager()
+        self.addCleanup(mgr.shutdown)
         return mgr.dict(), mgr.dict()
 
     def _fake_popen(self, return_code=0):
@@ -196,6 +197,53 @@ class TestForwardOnlyContainerSwitch(EncodeTestBase):
         self.assertFalse(os.path.exists(legacy))
         self.assertTrue(os.path.exists(os.path.join(self.dest_dir, 'Movie - 720p.mp4')))
 
+    def test_a_corrupt_mp4_does_not_discard_a_valid_mkv(self):
+        """Only the target container being corrupt must not cost a good encode."""
+        source = self._touch(self.source_dir, 'Movie.mkv')
+        corrupt = self._touch(self.dest_dir, 'Movie - 720p.mp4', b'corrupt')
+        valid = self._touch(self.dest_dir, 'Movie - 720p.mkv', b'already encoded')
+
+        processed, processing = self._managers()
+        with patch.object(monitor, 'ENCODING_CODEC', 'h264'), \
+             patch.object(monitor, 'is_already_low_quality', return_value=False), \
+             patch.object(monitor, 'SKIP_IF_LOW_QUALITY_EXISTS', False), \
+             patch.object(monitor, 'get_metadata_info', return_value={}), \
+             patch.object(monitor, 'verify_encoded_file',
+                          side_effect=lambda p: p.endswith('.mkv')), \
+             patch('subprocess.Popen', side_effect=self._fake_popen(0)), \
+             patch.object(monitor, 'wait_for_file_completion') as mock_wait:
+            monitor.encode_video(source, processed, processing)
+            mock_wait.assert_not_called()
+
+        self.assertEqual(self.ffmpeg_commands, [])
+        self.assertTrue(os.path.exists(valid))
+        self.assertTrue(processed.get(valid))
+        self.assertTrue(os.path.exists(corrupt), 'a good encode must not trigger cleanup')
+
+    def test_all_unusable_encodes_are_removed_before_re_encoding(self):
+        source = self._touch(self.source_dir, 'Movie.mkv')
+        mp4 = self._touch(self.dest_dir, 'Movie - 720p.mp4', b'corrupt')
+        mkv = self._touch(self.dest_dir, 'Movie - 720p.mkv', b'corrupt')
+
+        processed, processing = self._managers()
+        with patch.object(monitor, 'ENCODING_CODEC', 'h264'), \
+             patch.object(monitor, 'is_already_low_quality', return_value=False), \
+             patch.object(monitor, 'SKIP_IF_LOW_QUALITY_EXISTS', False), \
+             patch.object(monitor, 'get_metadata_info', return_value={}), \
+             patch.object(monitor, 'wait_for_file_completion', return_value=True), \
+             patch.object(monitor, 'get_audio_streams',
+                          return_value=[{'index': 1, 'codec_name': 'aac', 'channels': 2}]), \
+             patch.object(monitor, 'get_subtitle_streams',
+                          return_value={'copy': [], 'convert': []}), \
+             patch.object(monitor, 'verify_encoded_file',
+                          side_effect=lambda p: p.endswith('.tmp')), \
+             patch('subprocess.Popen', side_effect=self._fake_popen(0)):
+            monitor.encode_video(source, processed, processing)
+
+        self.assertFalse(os.path.exists(mkv))
+        self.assertTrue(os.path.exists(mp4), 'the new encode takes the .mp4 path')
+        self.assertEqual(len(self.ffmpeg_commands), 1)
+
     def test_growing_temp_file_in_legacy_container_blocks_a_second_encode(self):
         """A .mkv.tmp still being written is respected while targeting .mp4."""
         source = self._touch(self.source_dir, 'Movie.mkv')
@@ -265,24 +313,25 @@ class TestCodecAndContainerResolution(unittest.TestCase):
         self.assertFalse(monitor.is_output_filename('scratch.tmp'))
 
 
-class TestFindExistingOutput(EncodeTestBase):
+class TestExistingOutputs(EncodeTestBase):
 
-    def test_prefers_the_target_container(self):
+    def test_lists_the_target_container_first(self):
         self._touch(self.dest_dir, 'Movie - 720p.mkv')
         self._touch(self.dest_dir, 'Movie - 720p.mp4')
         with patch.object(monitor, 'ENCODING_CODEC', 'h264'):
-            found = monitor.find_existing_output(self.dest_dir, 'Movie - 720p')
-        self.assertTrue(found.endswith('.mp4'))
+            found = monitor.existing_outputs(self.dest_dir, 'Movie - 720p')
+        self.assertEqual([os.path.splitext(p)[1] for p in found], ['.mp4', '.mkv'])
 
     def test_finds_the_legacy_container(self):
         self._touch(self.dest_dir, 'Movie - 720p.mkv')
         with patch.object(monitor, 'ENCODING_CODEC', 'h264'):
-            found = monitor.find_existing_output(self.dest_dir, 'Movie - 720p')
-        self.assertTrue(found.endswith('.mkv'))
+            found = monitor.existing_outputs(self.dest_dir, 'Movie - 720p')
+        self.assertEqual(len(found), 1)
+        self.assertTrue(found[0].endswith('.mkv'))
 
-    def test_returns_none_when_nothing_encoded(self):
+    def test_empty_when_nothing_encoded(self):
         with patch.object(monitor, 'ENCODING_CODEC', 'h264'):
-            self.assertIsNone(monitor.find_existing_output(self.dest_dir, 'Movie - 720p'))
+            self.assertEqual(monitor.existing_outputs(self.dest_dir, 'Movie - 720p'), [])
 
 
 # ── FFmpeg command shape ────────────────────────────────────────────────────

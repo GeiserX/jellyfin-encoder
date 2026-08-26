@@ -99,19 +99,17 @@ def output_candidate_paths(dest_dir, output_name):
     return [os.path.join(dest_dir, output_name + ext) for ext in extensions]
 
 
-def find_existing_output(dest_dir, output_name):
+def existing_outputs(dest_dir, output_name):
     """
-    Return the existing encode for output_name in any supported container.
+    Every encode of output_name that exists, target container first.
 
     An encode already on disk is done, whatever container it was written in.
     This is what makes a codec switch forward-only: targeting .mp4 still
     recognises the .mkv an earlier configuration produced, so a library that is
     already encoded is never encoded again.
     """
-    for candidate in output_candidate_paths(dest_dir, output_name):
-        if os.path.exists(candidate):
-            return candidate
-    return None
+    return [p for p in output_candidate_paths(dest_dir, output_name)
+            if os.path.exists(p)]
 
 
 def is_output_filename(filename):
@@ -699,21 +697,27 @@ def encode_video(source_path, processed_files, processing_files):
 
         # An encode that already exists is done - including one written before a
         # codec or container change.  Flipping ENCODING_CODEC re-encodes nothing.
-        existing_output = find_existing_output(dest_dir, output_name)
+        encoded = existing_outputs(dest_dir, output_name)
 
-        if existing_output and processed_files.get(existing_output):
-            logging.info(f'Already processed: {existing_output}')
+        already_processed = next((p for p in encoded if processed_files.get(p)), None)
+        if already_processed:
+            logging.info(f'Already processed: {already_processed}')
             return
 
-        if existing_output:
-            if verify_encoded_file(existing_output):
-                logging.info(f'Valid encoded file exists: {existing_output}')
-                processed_files[existing_output] = True
-                # Ensure version symlink exists even for previously encoded files
-                create_version_symlink(source_path, existing_output)
-                _manifest_add(os.path.relpath(existing_output, DEST_FOLDER))
-                return
-            os.remove(existing_output)
+        # Any container that verifies counts, so a corrupt file in the target
+        # container never throws away a good encode in another one.
+        valid_output = next((p for p in encoded if verify_encoded_file(p)), None)
+        if valid_output:
+            logging.info(f'Valid encoded file exists: {valid_output}')
+            processed_files[valid_output] = True
+            # Ensure version symlink exists even for previously encoded files
+            create_version_symlink(source_path, valid_output)
+            _manifest_add(os.path.relpath(valid_output, DEST_FOLDER))
+            return
+
+        for corrupt in encoded:
+            logging.info(f'Removing unusable encode: {corrupt}')
+            os.remove(corrupt)
 
         if not wait_for_file_completion(source_path):
             return
