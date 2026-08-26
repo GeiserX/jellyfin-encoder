@@ -17,16 +17,17 @@
 
 ---
 
-**jellyfin-encoder** monitors your media library and automatically transcodes videos to optimized 720p HEVC or AV1 for bandwidth-efficient mobile and remote streaming. It runs as a Docker container, supports NVIDIA NVENC and Intel QSV hardware acceleration with automatic software fallback, and uses polling-based observation compatible with NFS, CIFS, and other network filesystems.
+**jellyfin-encoder** monitors your media library and automatically transcodes videos to optimized 720p HEVC, H.264, or AV1 for bandwidth-efficient mobile and remote streaming. It runs as a Docker container, supports NVIDIA NVENC and Intel QSV hardware acceleration with automatic software fallback, and uses polling-based observation compatible with NFS, CIFS, and other network filesystems.
 
 ## Features
 
 - **Automatic folder monitoring** -- watches source directories for new and deleted files using polling (NFS/CIFS compatible)
-- **Hardware-accelerated encoding** -- NVIDIA NVENC and Intel Quick Sync Video (QSV), with transparent software fallback (libx265 / libsvtav1)
+- **Hardware-accelerated encoding** -- NVIDIA NVENC and Intel Quick Sync Video (QSV), with transparent software fallback (libx265 / libx264 / libsvtav1)
 - **Smart skip logic** -- detects files already at 720p or lower via filename heuristics and ffprobe resolution analysis
 - **Jellyfin multi-version support** -- creates version symlinks so Jellyfin presents both original and transcoded copies to the user
-- **Audio normalization** -- re-encodes all audio tracks to stereo AC3 at 192 kbps for consistent mobile playback
-- **Subtitle preservation** -- copies MKV-native subtitle codecs and converts incompatible ones (MOV text, WebVTT) to SRT
+- **H.264 / AAC / MP4 output** -- set `ENCODING_CODEC: "h264"` for MP4 output that Jellyfin clients direct play without transcoding, and without re-encoding the library you already have (see [H.264, AAC and MP4 Output](#h264-aac-and-mp4-output))
+- **Audio normalization** -- re-encodes audio for consistent playback: AAC keeping up to 5.1 for MP4, stereo AC3 at 192 kbps for MKV
+- **Subtitle preservation** -- copies MKV-native subtitle codecs and converts incompatible ones (MOV text, WebVTT) to SRT; converts text subtitles to `mov_text` for MP4
 - **Guarded automatic cleanup** -- periodically removes orphaned encodes and stale symlinks with mount-health checks to prevent mass deletion (see [Safety & Cleanup](#safety--cleanup) below)
 - **Temp-file workflow** -- encodes to `.tmp` and atomically renames on success, so Jellyfin never indexes incomplete files (note: no cross-container locking — avoid pointing two encoders at the same destination subfolder)
 - **Configurable quality presets** -- LOW, MEDIUM, and HIGH profiles with per-codec CQ/CRF tuning
@@ -86,8 +87,12 @@ All settings are controlled via environment variables.
 | `DEST_FOLDER` | `/app/destination` | Path to the directory for encoded output |
 | `ENABLE_HW_ACCEL` | `true` | Enable hardware-accelerated encoding |
 | `HW_ENCODING_TYPE` | `nvidia` | Hardware encoder: `nvidia` or `intel` |
-| `ENCODING_CODEC` | `hevc` | Output codec: `hevc` or `av1` |
+| `ENCODING_CODEC` | `hevc` | Output codec: `hevc`, `h264`, or `av1` |
+| `OUTPUT_CONTAINER` | `auto` | Container: `auto` (MP4 for H.264, MKV otherwise), `mkv`, or `mp4` |
 | `ENCODING_QUALITY` | `LOW` | Quality preset: `LOW`, `MEDIUM`, or `HIGH` |
+| `AUDIO_CODEC` | `auto` | Audio codec: `auto` (AAC for MP4, AC3 for MKV), `aac`, or `ac3` |
+| `AUDIO_BITRATE` | `auto` | Bitrate per audio track: `auto` (192k stereo, 384k multichannel) or a value such as `256k` |
+| `AUDIO_CHANNELS` | `auto` | Channels per audio track: `auto` (AAC keeps up to 5.1, AC3 downmixes to stereo) or a count such as `2` |
 | `SYMLINK_TARGET_PREFIX` | _(empty)_ | Absolute path prefix for Jellyfin version symlinks (same-host mode) |
 | `SYMLINK_MANIFEST_TARGET` | _(empty)_ | Path prefix for cross-host manifest-based symlinks (see [Cross-Host Setup](#cross-host-manifest-mode)) |
 | `SYMLINK_VERSION_SUFFIX` | ` - 720p` | Suffix appended to symlink filenames |
@@ -97,11 +102,36 @@ All settings are controlled via environment variables.
 
 Each preset defines constant-quality (CQ) values for hardware encoding and constant rate factor (CRF) values for software fallback.
 
-| Preset | HEVC CQ / CRF | AV1 CQ / CRF | Intended Use |
-|---|---|---|---|
-| **LOW** | 32 / 30 | 45 / 40 | Mobile devices, minimal storage footprint |
-| **MEDIUM** | 26 / 26 | 35 / 35 | Balanced quality and file size |
-| **HIGH** | 22 / 22 | 28 / 28 | Higher fidelity, larger files |
+| Preset | HEVC CQ / CRF | H.264 CQ / CRF | AV1 CQ / CRF | Intended Use |
+|---|---|---|---|---|
+| **LOW** | 32 / 30 | 28 / 26 | 45 / 40 | Mobile devices, minimal storage footprint |
+| **MEDIUM** | 26 / 26 | 24 / 23 | 35 / 35 | Balanced quality and file size |
+| **HIGH** | 22 / 22 | 21 / 20 | 28 / 28 | Higher fidelity, larger files |
+
+## H.264, AAC and MP4 Output
+
+Set `ENCODING_CODEC: "h264"` and new encodes come out as H.264 video with AAC audio in an MP4 container. Nothing else about the setup changes.
+
+| Aspect | What you get |
+|---|---|
+| Video encoder | `h264_qsv` (Intel), `h264_nvenc` (NVIDIA), `libx264` (software fallback) |
+| Container | `.mp4`, with the index written at the front so players can start before reading the whole file |
+| Audio | AAC, source channel layout up to 5.1, at 192 kbps stereo or 384 kbps multichannel |
+| Pixel format | Forced to 8-bit `yuv420p`, so 10-bit sources encode instead of failing on hardware H.264 |
+
+`hevc` and `av1` still produce `.mkv` with the stereo AC3 audio they always have. To pair a codec with a different container, set `OUTPUT_CONTAINER` explicitly.
+
+### Switching codec never re-encodes what you already have
+
+Changing `ENCODING_CODEC` on a library that is already encoded produces zero re-encodes.
+
+An output on disk counts as done whatever container it is in. If your destination is full of `Movie - 720p.mkv` files and you switch to `ENCODING_CODEC: "h264"`, the encoder leaves those files alone. It picks up only the titles that have no encode at all, and those come out as `.mp4`. Switching back to `hevc` works the same way in reverse, respecting the `.mp4` outputs you already have.
+
+The skip check, orphan cleanup, the symlink manifest, and source-deletion handling all match on the filename stem rather than the extension. A destination folder holding a mix of `.mkv` and `.mp4` works fine, so the two formats can coexist for as long as you like.
+
+### Subtitles in MP4
+
+MP4 carries text subtitles only. The encoder converts text tracks (SRT, ASS/SSA, WebVTT) to `mov_text` and drops bitmap tracks (PGS, DVB), which have no MP4 equivalent. Keep external `.srt` sidecars next to the encode if you need those. If FFmpeg fails with subtitles mapped, the encoder retries once without them. A subtitle track FFmpeg cannot handle costs you the subtitles, never the encode.
 
 ## Hardware Acceleration
 
@@ -117,7 +147,7 @@ deploy:
         - capabilities: [gpu]
 ```
 
-Set `HW_ENCODING_TYPE: "nvidia"`. Supported encoders: `hevc_nvenc`, `av1_nvenc`.
+Set `HW_ENCODING_TYPE: "nvidia"`. Supported encoders: `hevc_nvenc`, `h264_nvenc`, `av1_nvenc`.
 
 ### Intel (Quick Sync Video)
 
@@ -128,11 +158,11 @@ devices:
   - /dev/dri:/dev/dri
 ```
 
-Set `HW_ENCODING_TYPE: "intel"`. Supported encoders: `hevc_qsv`, `av1_qsv`.
+Set `HW_ENCODING_TYPE: "intel"`. Supported encoders: `hevc_qsv`, `h264_qsv`, `av1_qsv`.
 
 ### Software Fallback
 
-If hardware acceleration is disabled or unavailable, the encoder falls back to `libx265` (HEVC) or `libsvtav1` (AV1) using CRF-based quality control. Worker count scales to the number of available CPU cores.
+If hardware acceleration is disabled or unavailable, the encoder falls back to `libx265` (HEVC), `libx264` (H.264), or `libsvtav1` (AV1) using CRF-based quality control. Worker count scales to the number of available CPU cores.
 
 ## Safety & Cleanup
 
@@ -147,7 +177,7 @@ The encoder periodically removes orphaned encodes (files in `DEST_FOLDER` with n
 | **Mount health on delete events** | `VideoHandler.on_deleted` | Before trusting a file-delete event from the polling observer, the handler verifies the source mount is responsive. If not, the event is ignored. |
 | **Growing tmp files** | `cleanup_destination` | `.tmp` files are kept if they are still being written |
 
-**Same-folder mode** (`SOURCE_FOLDER == DEST_FOLDER`): versioned output filenames (e.g., `Movie - 720p.mkv`) are recognized as valid encodes and excluded from orphan cleanup.
+**Same-folder mode** (`SOURCE_FOLDER == DEST_FOLDER`): versioned output filenames (e.g., `Movie - 720p.mkv` or `Movie - 720p.mp4`) are recognized as valid encodes and excluded from orphan cleanup.
 
 **Delete-event rate limiter**: If more than 50 delete events fire within 60 seconds, further deletes are suppressed. This prevents mount outages from cascading into mass encode deletion. The limit resets automatically after the window expires.
 
@@ -234,13 +264,13 @@ Source folder (polling observer)
   Resolution check ──> Skip if <= 720p
         |
         v
-  FFmpeg transcode ──> scale to 720p, encode video, stereo AC3 audio, copy/convert subtitles
+  FFmpeg transcode ──> scale to 720p, encode video and audio, copy/convert subtitles
         |
         v
   Verify output (ffprobe duration check)
         |
         v
-  Atomic rename .tmp -> .mkv ──> Create Jellyfin version symlink (optional)
+  Atomic rename .tmp -> .mkv/.mp4 ──> Create Jellyfin version symlink (optional)
 ```
 
 Key design decisions:
@@ -249,6 +279,7 @@ Key design decisions:
 - **Temp-file workflow** -- encodes to a `.tmp` file first and atomically renames on success, preventing Jellyfin from indexing incomplete files.
 - **File-growth detection** -- before deleting stale `.tmp` files, the cleanup routine checks whether the file is still being written by another instance.
 - **ProcessPoolExecutor** -- one worker for hardware encoding (GPU is the bottleneck), multiple workers for software encoding (CPU-bound).
+- **Container-agnostic output lookup** -- an encode is located by filename stem across every container the tool writes, so changing codec or container never re-encodes a library that is already done.
 
 ## Utilities
 
