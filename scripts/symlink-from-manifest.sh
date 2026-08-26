@@ -90,12 +90,14 @@ for rel_path, target in desired.items():
     os.symlink(target, link_path)
     created += 1
 
-# Pass 2: Remove orphaned version symlinks not in manifest
+# Pass 2: Remove orphaned version symlinks not in manifest.
+# Covers every container the encoder writes, so an .mp4 encode that goes away
+# does not leave its symlink behind.
 removed = 0
-suffix = version_suffix + ".mkv"
+suffixes = tuple(version_suffix + ext for ext in (".mkv", ".mp4"))
 for root, _, files in os.walk(media_dir):
     for fname in files:
-        if not fname.endswith(suffix):
+        if not fname.endswith(suffixes):
             continue
         full_path = os.path.join(root, fname)
         if not os.path.islink(full_path):

@@ -19,7 +19,14 @@ import json
 ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
 HW_ENCODING_TYPE = os.getenv('HW_ENCODING_TYPE', 'nvidia').lower()  # nvidia, intel
 ENCODING_QUALITY = os.getenv('ENCODING_QUALITY', 'LOW').upper()  # LOW, MEDIUM, HIGH
-ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower()  # hevc or av1
+ENCODING_CODEC = os.getenv('ENCODING_CODEC', 'hevc').lower()  # hevc, h264 or av1
+OUTPUT_CONTAINER = os.getenv('OUTPUT_CONTAINER', 'auto').lower()  # auto, mkv, mp4
+
+# Audio output. 'auto' follows the container: AAC for MP4, AC3 for Matroska.
+AUDIO_CODEC = os.getenv('AUDIO_CODEC', 'auto').lower()  # auto, aac, ac3
+AUDIO_BITRATE = os.getenv('AUDIO_BITRATE', 'auto').lower()  # auto, or e.g. '256k'
+AUDIO_CHANNELS = os.getenv('AUDIO_CHANNELS', 'auto').lower()  # auto, or a channel count
+MAX_AUDIO_CHANNELS = 6  # 5.1 - the most AAC preserves from the source
 
 SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', '/app/source')
 DEST_FOLDER = os.getenv('DEST_FOLDER', '/app/destination')
@@ -45,6 +52,72 @@ SKIP_IF_LOW_QUALITY_EXISTS = os.getenv('SKIP_IF_LOW_QUALITY_EXISTS', 'true').low
 QUALITY_SUFFIXES = [' - 4K', ' - 2160p', ' - 1080p', ' - 720p', ' - 480p', ' - SD', ' - HDR', ' - REMUX', ' - Remux']
 
 import re
+
+
+# -- Codec and container resolution ------------------------------------------
+# Containers this encoder can write.  Every lookup for an existing encode walks
+# all of them, so switching codec or container never re-encodes a library that
+# is already done.
+OUTPUT_EXTENSIONS = ('.mkv', '.mp4')
+CONTAINER_EXTENSIONS = {'mkv': '.mkv', 'mp4': '.mp4'}
+CONTAINER_FORMATS = {'mkv': 'matroska', 'mp4': 'mp4'}
+
+CODEC_ALIASES = {
+    'hevc': 'hevc', 'h265': 'hevc', 'x265': 'hevc',
+    'h264': 'h264', 'avc': 'h264', 'x264': 'h264',
+    'av1': 'av1',
+}
+
+
+def resolve_codec():
+    """Normalise ENCODING_CODEC to 'hevc', 'h264' or 'av1'."""
+    codec = CODEC_ALIASES.get(ENCODING_CODEC)
+    if codec is None:
+        logging.warning(f'Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
+        return 'hevc'
+    return codec
+
+
+def resolve_container():
+    """Container for new encodes: MP4 for H.264, MKV otherwise."""
+    if OUTPUT_CONTAINER in CONTAINER_EXTENSIONS:
+        return OUTPUT_CONTAINER
+    if OUTPUT_CONTAINER != 'auto':
+        logging.warning(f'Unsupported OUTPUT_CONTAINER "{OUTPUT_CONTAINER}". Using auto.')
+    return 'mp4' if resolve_codec() == 'h264' else 'mkv'
+
+
+def get_output_extension():
+    """File extension new encodes are written with."""
+    return CONTAINER_EXTENSIONS[resolve_container()]
+
+
+def output_candidate_paths(dest_dir, output_name):
+    """Every path an encode of output_name could occupy, target container first."""
+    preferred = get_output_extension()
+    extensions = [preferred] + [e for e in OUTPUT_EXTENSIONS if e != preferred]
+    return [os.path.join(dest_dir, output_name + ext) for ext in extensions]
+
+
+def existing_outputs(dest_dir, output_name):
+    """
+    Every encode of output_name that exists, target container first.
+
+    An encode already on disk is done, whatever container it was written in.
+    This is what makes a codec switch forward-only: targeting .mp4 still
+    recognises the .mkv an earlier configuration produced, so a library that is
+    already encoded is never encoded again.
+    """
+    return [p for p in output_candidate_paths(dest_dir, output_name)
+            if os.path.exists(p)]
+
+
+def is_output_filename(filename):
+    """True when filename is one of our encodes (or its .tmp), any container."""
+    name = filename.lower()
+    if name.endswith('.tmp'):
+        name = name[:-len('.tmp')]
+    return name.endswith(OUTPUT_EXTENSIONS)
 
 
 # ── Manifest-based symlink helpers ──────────────────────────────────────────
@@ -168,7 +241,7 @@ def _manifest_full_sync():
     manifest = {}
     for root, _, files in os.walk(DEST_FOLDER):
         for file in files:
-            if not file.endswith('.mkv') or file.endswith('.tmp'):
+            if file.endswith('.tmp') or not is_output_filename(file):
                 continue
             full_path = os.path.join(root, file)
             rel_path = os.path.relpath(full_path, DEST_FOLDER)
@@ -264,7 +337,9 @@ _delete_event_times = []
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
-             f'CODEC={ENCODING_CODEC}, QUALITY={ENCODING_QUALITY}, HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
+             f'CODEC={resolve_codec()}, CONTAINER={resolve_container()}, QUALITY={ENCODING_QUALITY}, '
+             f'HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
+             f'AUDIO={AUDIO_CODEC}/{AUDIO_BITRATE}/{AUDIO_CHANNELS}ch, '
              f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}, '
              f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}')
 
@@ -389,7 +464,8 @@ def is_video_file(filename):
         return False  # Skip temporary/partial files
     
     # Skip version files (created by this script - either symlinks or actual transcoded files)
-    if SYMLINK_VERSION_SUFFIX and filename.endswith(f'{SYMLINK_VERSION_SUFFIX}.mkv'):
+    if SYMLINK_VERSION_SUFFIX and any(
+            filename.endswith(f'{SYMLINK_VERSION_SUFFIX}{ext}') for ext in OUTPUT_EXTENSIONS):
         return False
     # Also skip files that have our version suffix anywhere (handles case variations)
     if SYMLINK_VERSION_SUFFIX and SYMLINK_VERSION_SUFFIX.strip() in base_name:
@@ -403,7 +479,10 @@ def is_version_symlink(filepath):
     """Check if a file is a version symlink created by this script."""
     if not SYMLINK_VERSION_SUFFIX:
         return False
-    return os.path.basename(filepath).endswith(f'{SYMLINK_VERSION_SUFFIX}.mkv') and os.path.islink(filepath)
+    stem, ext = os.path.splitext(os.path.basename(filepath))
+    return (ext.lower() in OUTPUT_EXTENSIONS
+            and stem.endswith(SYMLINK_VERSION_SUFFIX)
+            and os.path.islink(filepath))
 
 
 def wait_for_file_completion(filepath, timeout=TIMEOUT):
@@ -448,7 +527,7 @@ def verify_encoded_file(file_path):
 def get_audio_streams(source_path):
     ffprobe_cmd = [
         'ffprobe', '-v', 'error', '-select_streams', 'a',
-        '-show_entries', 'stream=index,codec_name', '-of', 'json', source_path
+        '-show_entries', 'stream=index,codec_name,channels', '-of', 'json', source_path
     ]
     ffprobe_process = subprocess.run(ffprobe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if ffprobe_process.returncode != 0:
@@ -462,15 +541,20 @@ def get_audio_streams(source_path):
 SUBTITLE_CODECS_COPY = ['ass', 'ssa', 'srt', 'subrip', 'hdmv_pgs_subtitle', 'dvb_subtitle']
 # Convert to SRT: text-based codecs that need conversion for MKV
 SUBTITLE_CODECS_CONVERT = ['mov_text', 'webvtt']
+# MP4 carries text subtitles as mov_text and nothing else.  Bitmap subtitles
+# (PGS, DVB) have no MP4 representation, so they are dropped instead of risking
+# the encode; external .srt sidecars are the subtitle path for MP4 output.
+SUBTITLE_CODECS_TEXT = ['ass', 'ssa', 'srt', 'subrip', 'mov_text', 'webvtt', 'text']
 
 
-def get_subtitle_streams(source_path):
+def get_subtitle_streams(source_path, container=None):
     """
-    Analyze subtitle streams and categorize them for MKV output.
-    
+    Analyze subtitle streams and categorize them for the output container.
+
     Returns:
         dict with 'copy' and 'convert' lists, each containing (stream_index, codec_name) tuples
     """
+    container = container or resolve_container()
     ffprobe_cmd = [
         'ffprobe', '-v', 'error', '-select_streams', 's',
         '-show_entries', 'stream=index,codec_name', '-of', 'json', source_path
@@ -480,27 +564,84 @@ def get_subtitle_streams(source_path):
     if ffprobe_process.returncode != 0:
         logging.error(f'ffprobe failed subtitle check for file: {source_path}')
         return {'copy': [], 'convert': []}
-    
+
     stream_info = json.loads(ffprobe_process.stdout)
     result = {'copy': [], 'convert': []}
-    
+
     for stream in stream_info.get('streams', []):
         codec = stream.get('codec_name', '')
         index = stream.get('index')
-        
+
         if not codec or index is None:
             # Unknown codec (e.g., WebVTT reported as empty) - skip
             logging.debug(f'Skipping subtitle stream {index} with unknown codec')
             continue
-        
+
+        if container == 'mp4':
+            # Nothing is copy-safe in MP4: text converts to mov_text, the rest goes.
+            if codec in SUBTITLE_CODECS_TEXT:
+                result['convert'].append((index, codec))
+            else:
+                logging.info(f'Dropping subtitle stream {index} ({codec}): MP4 cannot carry it')
+            continue
+
         if codec in SUBTITLE_CODECS_COPY:
             result['copy'].append((index, codec))
         elif codec in SUBTITLE_CODECS_CONVERT:
             result['convert'].append((index, codec))
         else:
             logging.debug(f'Skipping unsupported subtitle codec: {codec} (stream {index})')
-    
+
     return result
+
+
+def resolve_audio_codec(container):
+    """Audio codec for the output: AAC for MP4, AC3 for Matroska."""
+    if AUDIO_CODEC in ('aac', 'ac3'):
+        return AUDIO_CODEC
+    if AUDIO_CODEC != 'auto':
+        logging.warning(f'Unsupported AUDIO_CODEC "{AUDIO_CODEC}". Using auto.')
+    return 'aac' if container == 'mp4' else 'ac3'
+
+
+def resolve_audio_channels(stream, audio_codec):
+    """
+    Channel count for one output audio stream.
+
+    AC3 keeps the stereo downmix this encoder has always produced.  AAC follows
+    the source layout up to 5.1, so surround survives the transcode.
+    """
+    if AUDIO_CHANNELS != 'auto':
+        try:
+            return max(1, int(AUDIO_CHANNELS))
+        except ValueError:
+            logging.warning(f'Invalid AUDIO_CHANNELS "{AUDIO_CHANNELS}". Using auto.')
+    if audio_codec != 'aac':
+        return 2
+    try:
+        source_channels = int(stream.get('channels') or 0)
+    except (TypeError, ValueError):
+        source_channels = 0
+    if source_channels < 1:
+        return 2
+    return min(source_channels, MAX_AUDIO_CHANNELS)
+
+
+def resolve_audio_bitrate(channels):
+    """Bitrate for one output audio stream: 192k stereo, 384k multichannel."""
+    if AUDIO_BITRATE != 'auto':
+        return AUDIO_BITRATE
+    return '384k' if channels > 2 else '192k'
+
+
+def _run_ffmpeg(command):
+    """Run an FFmpeg command, streaming its output to the log.  Returns the exit code."""
+    logging.info(f'FFmpeg command: {" ".join(command)}')
+    process = subprocess.Popen(command, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+    for line in process.stdout:
+        logging.info(line.strip())
+    return process.wait()
 
 def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
@@ -531,80 +672,93 @@ def encode_video(source_path, processed_files, processing_files):
 
         base_name = os.path.basename(dest_path)
         source_name, _ = os.path.splitext(base_name)
-        
+
         # Always append version suffix (e.g., " - 720p") for Jellyfin multi-version detection
         if SYMLINK_VERSION_SUFFIX:
             output_name = get_version_output_name(source_name)
             if output_name is None:
                 logging.info(f'Skipping already transcoded file: {source_path}')
                 return
-            dest_file_final = os.path.join(dest_dir, f"{output_name}.mkv")
         else:
-            dest_file_final = os.path.join(dest_dir, f"{source_name}.mkv")
-        
+            output_name = source_name
+
+        dest_file_final = os.path.join(dest_dir, f"{output_name}{get_output_extension()}")
         dest_file_temp = dest_file_final + ".tmp"
 
-        if os.path.exists(dest_file_temp):
-            if is_file_growing(dest_file_temp):
-                logging.info(f'Temp file {dest_file_temp} is currently growing; skipping deletion.')
-                # Skip processing this file
+        # A half-finished encode may have been left behind in another container.
+        for temp_path in (p + ".tmp" for p in output_candidate_paths(dest_dir, output_name)):
+            if not os.path.exists(temp_path):
+                continue
+            if is_file_growing(temp_path):
+                logging.info(f'Temp file {temp_path} is currently growing; skipping deletion.')
                 return
-            else:
-                logging.info(f'Deleting temp file: {dest_file_temp}')
-                os.remove(dest_file_temp)
+            logging.info(f'Deleting temp file: {temp_path}')
+            os.remove(temp_path)
 
-        if processed_files.get(dest_file_final):
-            logging.info(f'Already processed: {dest_file_final}')
+        # An encode that already exists is done - including one written before a
+        # codec or container change.  Flipping ENCODING_CODEC re-encodes nothing.
+        encoded = existing_outputs(dest_dir, output_name)
+
+        already_processed = next((p for p in encoded if processed_files.get(p)), None)
+        if already_processed:
+            logging.info(f'Already processed: {already_processed}')
             return
 
-        if os.path.exists(dest_file_final) and verify_encoded_file(dest_file_final):
-            logging.info(f'Valid encoded file exists: {dest_file_final}')
-            processed_files[dest_file_final] = True
+        # Any container that verifies counts, so a corrupt file in the target
+        # container never throws away a good encode in another one.
+        valid_output = next((p for p in encoded if verify_encoded_file(p)), None)
+        if valid_output:
+            logging.info(f'Valid encoded file exists: {valid_output}')
+            processed_files[valid_output] = True
             # Ensure version symlink exists even for previously encoded files
-            create_version_symlink(source_path, dest_file_final)
-            _manifest_add(os.path.relpath(dest_file_final, DEST_FOLDER))
+            create_version_symlink(source_path, valid_output)
+            _manifest_add(os.path.relpath(valid_output, DEST_FOLDER))
             return
-        elif os.path.exists(dest_file_final):
-            os.remove(dest_file_final)
-        if os.path.exists(dest_file_temp):
-            os.remove(dest_file_temp)
+
+        for corrupt in encoded:
+            logging.info(f'Removing unusable encode: {corrupt}')
+            os.remove(corrupt)
 
         if not wait_for_file_completion(source_path):
             return
 
         quality_settings = {
-            'LOW': {'cq': {'av1': 45, 'hevc': 32}, 'crf': {'av1': 40, 'hevc': 30}},
-            'MEDIUM': {'cq': {'av1': 35, 'hevc': 26}, 'crf': {'av1': 35, 'hevc': 26}},
-            'HIGH': {'cq': {'av1': 28, 'hevc': 22}, 'crf': {'av1': 28, 'hevc': 22}},
+            'LOW': {'cq': {'av1': 45, 'hevc': 32, 'h264': 28},
+                    'crf': {'av1': 40, 'hevc': 30, 'h264': 26}},
+            'MEDIUM': {'cq': {'av1': 35, 'hevc': 26, 'h264': 24},
+                       'crf': {'av1': 35, 'hevc': 26, 'h264': 23}},
+            'HIGH': {'cq': {'av1': 28, 'hevc': 22, 'h264': 21},
+                     'crf': {'av1': 28, 'hevc': 22, 'h264': 20}},
         }
 
         quality = quality_settings.get(ENCODING_QUALITY, quality_settings['LOW'])
+
+        codec = resolve_codec()
+        container = resolve_container()
 
         hw_enc_supported = True
         video_encoder = []
 
         if ENABLE_HW_ACCEL:
             if HW_ENCODING_TYPE == 'nvidia':
-                if ENCODING_CODEC == 'av1':
+                if codec == 'av1':
                     video_encoder = ['-c:v', 'av1_nvenc', '-preset', 'medium',
                                      '-cq', str(quality['cq']['av1'])]
-                elif ENCODING_CODEC == 'hevc':
-                    video_encoder = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr_hq',
-                                     '-cq', str(quality['cq']['hevc']), '-b:v', '0']
+                elif codec == 'h264':
+                    video_encoder = ['-c:v', 'h264_nvenc', '-preset', 'p5', '-rc', 'vbr',
+                                     '-cq', str(quality['cq']['h264']), '-b:v', '0']
                 else:
-                    logging.warning(f'NVIDIA encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
                     video_encoder = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc', 'vbr_hq',
                                      '-cq', str(quality['cq']['hevc']), '-b:v', '0']
 
             elif HW_ENCODING_TYPE == 'intel':
-                if ENCODING_CODEC == 'av1':
+                if codec == 'av1':
                     video_encoder = ['-c:v', 'av1_qsv', '-preset', 'medium',
                                      '-global_quality', str(quality['cq']['av1'])]
-                elif ENCODING_CODEC == 'hevc':
-                    video_encoder = ['-c:v', 'hevc_qsv', '-preset', 'medium',
-                                     '-global_quality', str(quality['cq']['hevc'])]
+                elif codec == 'h264':
+                    video_encoder = ['-c:v', 'h264_qsv', '-preset', 'medium',
+                                     '-global_quality', str(quality['cq']['h264'])]
                 else:
-                    logging.warning(f'Intel encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
                     video_encoder = ['-c:v', 'hevc_qsv', '-preset', 'medium',
                                      '-global_quality', str(quality['cq']['hevc'])]
             else:
@@ -615,14 +769,13 @@ def encode_video(source_path, processed_files, processing_files):
 
         if not hw_enc_supported:
             # Software Encoding fallback
-            if ENCODING_CODEC == 'av1':
+            if codec == 'av1':
                 video_encoder = ['-c:v', 'libsvtav1', '-preset', '6', '-crf',
                                  str(quality['crf']['av1']), '-cpu-used', '4']
-            elif ENCODING_CODEC == 'hevc':
-                video_encoder = ['-c:v', 'libx265', '-preset', 'medium', '-crf',
-                                 str(quality['crf']['hevc'])]
+            elif codec == 'h264':
+                video_encoder = ['-c:v', 'libx264', '-preset', 'medium', '-crf',
+                                 str(quality['crf']['h264'])]
             else:
-                logging.warning(f'Software encoding: Unsupported codec "{ENCODING_CODEC}". Defaulting to HEVC.')
                 video_encoder = ['-c:v', 'libx265', '-preset', 'medium', '-crf',
                                  str(quality['crf']['hevc'])]
 
@@ -632,51 +785,67 @@ def encode_video(source_path, processed_files, processing_files):
             logging.error(f'No audio streams found in file: {source_path}')
             return
 
+        video_filter = 'scale=-1:720'
+        if codec == 'h264':
+            # 8-bit 4:2:0 is the only pixel format the hardware H.264 encoders
+            # accept, and the only one every H.264 decoder can play.
+            video_filter += ',format=yuv420p'
+
         # Build the FFmpeg command
         command = [
             'ffmpeg', '-loglevel', 'verbose', '-y',
             '-analyzeduration', '100M', '-probesize', '100M',
             '-i', source_path,
             '-map', '0:v:0',
-            '-vf', 'scale=-1:720'
+            '-vf', video_filter
         ] + video_encoder
 
         # Process each audio stream
+        audio_codec = resolve_audio_codec(container)
         for idx, stream in enumerate(audio_streams):
-            codec_name = stream['codec_name']
+            channels = resolve_audio_channels(stream, audio_codec)
             # Map the audio stream
             command.extend(['-map', f'0:a:{idx}'])
-            # Re-encode all audio streams to AC3, downmixed to stereo
-            command.extend([f'-c:a:{idx}', 'ac3', f'-b:a:{idx}', '192k', f'-ac:a:{idx}', '2'])
+            command.extend([f'-c:a:{idx}', audio_codec,
+                            f'-b:a:{idx}', resolve_audio_bitrate(channels),
+                            f'-ac:a:{idx}', str(channels)])
 
-        # Map subtitles with smart codec handling for MKV compatibility
-        subtitle_streams = get_subtitle_streams(source_path)
+        # Map subtitles with codec handling for the target container
+        subtitle_streams = get_subtitle_streams(source_path, container)
+        convert_codec = 'mov_text' if container == 'mp4' else 'srt'
+        subtitle_args = []
         sub_output_idx = 0
-        
-        # Copy-safe subtitles (can be copied directly to MKV)
-        for stream_idx, codec in subtitle_streams['copy']:
-            command.extend(['-map', f'0:{stream_idx}', f'-c:s:{sub_output_idx}', 'copy'])
+
+        # Copy-safe subtitles (MKV only - MP4 categorises everything as convert)
+        for stream_idx, sub_codec in subtitle_streams['copy']:
+            subtitle_args.extend(['-map', f'0:{stream_idx}', f'-c:s:{sub_output_idx}', 'copy'])
             sub_output_idx += 1
-        
-        # Subtitles that need conversion to SRT for MKV compatibility
-        for stream_idx, codec in subtitle_streams['convert']:
-            command.extend(['-map', f'0:{stream_idx}', f'-c:s:{sub_output_idx}', 'srt'])
+
+        # Subtitles that need conversion for the container (SRT for MKV, mov_text for MP4)
+        for stream_idx, sub_codec in subtitle_streams['convert']:
+            subtitle_args.extend(['-map', f'0:{stream_idx}', f'-c:s:{sub_output_idx}', convert_codec])
             sub_output_idx += 1
-        
+
         if sub_output_idx == 0:
             logging.info(f'No compatible subtitle streams found for: {os.path.basename(source_path)}')
 
         # Set output format and destination file
-        command.extend(['-f', 'matroska', dest_file_temp])
+        output_args = ['-f', CONTAINER_FORMATS[container]]
+        if container == 'mp4':
+            # Index at the front, so players can start without reading the whole file.
+            output_args.extend(['-movflags', '+faststart'])
+        output_args.append(dest_file_temp)
 
-        logging.info(f'FFmpeg command: {" ".join(command)}')
+        returncode = _run_ffmpeg(command + subtitle_args + output_args)
 
-        # Run FFmpeg command
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in process.stdout:
-            logging.info(line.strip())
+        if returncode != 0 and subtitle_args:
+            # A subtitle stream must never cost us the encode.
+            logging.warning(f'FFmpeg failed with subtitles mapped, retrying without them: {source_path}')
+            if os.path.exists(dest_file_temp):
+                os.remove(dest_file_temp)
+            returncode = _run_ffmpeg(command + ['-sn'] + output_args)
 
-        if process.wait() == 0:
+        if returncode == 0:
             if verify_encoded_file(dest_file_temp):
                 os.rename(dest_file_temp, dest_file_final)
                 processed_files[dest_file_final] = True
@@ -710,8 +879,10 @@ def create_version_symlink(source_path, dest_file_final):
         source_dir = os.path.dirname(source_path)
         source_name, source_ext = os.path.splitext(os.path.basename(source_path))
         
-        # Create symlink name with version suffix (e.g., "Movie - 720p.mkv")
-        symlink_name = f"{source_name}{SYMLINK_VERSION_SUFFIX}.mkv"
+        # Create symlink name with version suffix (e.g., "Movie - 720p.mkv"),
+        # in whatever container the encode actually used.
+        symlink_ext = os.path.splitext(dest_file_final)[1] or get_output_extension()
+        symlink_name = f"{source_name}{SYMLINK_VERSION_SUFFIX}{symlink_ext}"
         symlink_path = os.path.join(source_dir, symlink_name)
         
         # Calculate the target path as seen by the source host
@@ -743,12 +914,13 @@ def delete_version_symlink(source_path):
     try:
         source_dir = os.path.dirname(source_path)
         source_name, _ = os.path.splitext(os.path.basename(source_path))
-        symlink_name = f"{source_name}{SYMLINK_VERSION_SUFFIX}.mkv"
-        symlink_path = os.path.join(source_dir, symlink_name)
-        
-        if os.path.islink(symlink_path):
-            os.unlink(symlink_path)
-            logging.info(f'Deleted version symlink: {symlink_path}')
+
+        # Remove the symlink whichever container it was created for.
+        for ext in OUTPUT_EXTENSIONS:
+            symlink_path = os.path.join(source_dir, f"{source_name}{SYMLINK_VERSION_SUFFIX}{ext}")
+            if os.path.islink(symlink_path):
+                os.unlink(symlink_path)
+                logging.info(f'Deleted version symlink: {symlink_path}')
     except Exception as e:
         logging.error(f'Failed to delete version symlink for {source_path}: {e}')
 
@@ -758,26 +930,25 @@ def delete_encoded_video(source_path):
     dest_path = os.path.join(DEST_FOLDER, relative_path)
     dest_dir = os.path.dirname(dest_path)
     source_name, _ = os.path.splitext(os.path.basename(dest_path))
-    
+
     # Use version-aware naming to find the encoded file
     if SYMLINK_VERSION_SUFFIX:
         output_name = get_version_output_name(source_name)
-        if output_name:
-            encoded_file = os.path.join(dest_dir, f"{output_name}.mkv")
-        else:
+        if output_name is None:
             return  # This was a transcoded file itself
     else:
-        encoded_file = os.path.join(dest_dir, f"{source_name}.mkv")
-    
-    temp_file = encoded_file + ".tmp"
-    for f in [encoded_file, temp_file]:
-        if os.path.exists(f):
-            os.remove(f)
-            logging.info(f'Deleted: {f}')
+        output_name = source_name
+
+    # The encode may sit in any container this tool has written.
+    for encoded_file in output_candidate_paths(dest_dir, output_name):
+        for f in [encoded_file, encoded_file + ".tmp"]:
+            if os.path.exists(f):
+                os.remove(f)
+                logging.info(f'Deleted: {f}')
+        _manifest_remove(os.path.relpath(encoded_file, DEST_FOLDER))
 
     # Also delete the version symlink if applicable
     delete_version_symlink(source_path)
-    _manifest_remove(os.path.relpath(encoded_file, DEST_FOLDER))
 
 
 def scan_source_directory():
@@ -869,21 +1040,21 @@ def cleanup_destination():
 
     # Secondary guard: source count vs destination encode count.
     # In same-folder mode, use is_video_file() to exclude version-suffixed
-    # outputs from the count (they inflate dest_mkv_count and cause false
+    # outputs from the count (they inflate dest_encode_count and cause false
     # "mount degraded" signals).
     same_folder_mode = os.path.normpath(SOURCE_FOLDER) == os.path.normpath(DEST_FOLDER)
-    dest_mkv_count = 0
+    dest_encode_count = 0
     for root, _, files in os.walk(DEST_FOLDER):
         for file in files:
-            if file.lower().endswith('.mkv') and not file.lower().endswith('.mkv.tmp'):
+            if is_output_filename(file) and not file.lower().endswith('.tmp'):
                 if same_folder_mode and not is_video_file(file):
                     continue
-                dest_mkv_count += 1
+                dest_encode_count += 1
 
-    if dest_mkv_count > 0 and source_count < dest_mkv_count * 0.5:
+    if dest_encode_count > 0 and source_count < dest_encode_count * 0.5:
         logging.error(
             f'SOURCE MOUNT MAY BE DEGRADED – source has {source_count} video files '
-            f'but destination has {dest_mkv_count} encoded files. '
+            f'but destination has {dest_encode_count} encoded files. '
             f'Refusing cleanup to protect encoded library. '
             f'Check that the network mount is fully available.'
         )
@@ -913,12 +1084,12 @@ def cleanup_destination():
         for file in files:
             full_path = os.path.join(root, file)
 
-            # We only touch our own output
-            if not file.lower().endswith(('.mkv', '.mkv.tmp')):
+            # We only touch our own output, in any container we can write
+            if not is_output_filename(file):
                 continue
 
             rel_dest = os.path.relpath(full_path, DEST_FOLDER)
-            dest_stem, dest_ext = os.path.splitext(rel_dest)          # *.mkv or *.mkv.tmp
+            dest_stem, dest_ext = os.path.splitext(rel_dest)          # *.mkv/*.mp4 or *.tmp
             if dest_ext == '.tmp':
                 dest_stem, _ = os.path.splitext(dest_stem)            # strip second ext
 
@@ -968,26 +1139,26 @@ def cleanup_orphaned_symlinks():
         )
         return
 
-    dest_mkv_count = 0
+    dest_encode_count = 0
     for root, _, files in os.walk(DEST_FOLDER):
         for file in files:
-            if file.lower().endswith('.mkv') and not file.lower().endswith('.mkv.tmp'):
-                dest_mkv_count += 1
+            if is_output_filename(file) and not file.lower().endswith('.tmp'):
+                dest_encode_count += 1
 
-    if dest_mkv_count > 0 and source_count < dest_mkv_count * 0.5:
+    if dest_encode_count > 0 and source_count < dest_encode_count * 0.5:
         logging.error(
             f'SOURCE MOUNT MAY BE DEGRADED – source has {source_count} video files '
-            f'but destination has {dest_mkv_count} encoded files. '
+            f'but destination has {dest_encode_count} encoded files. '
             f'Refusing symlink cleanup to protect library. '
             f'Check that the network mount is fully available.'
         )
         return
 
-    suffix = SYMLINK_VERSION_SUFFIX + '.mkv'
+    suffixes = tuple(SYMLINK_VERSION_SUFFIX + ext for ext in OUTPUT_EXTENSIONS)
 
     for root, _, files in os.walk(SOURCE_FOLDER):
         for file in files:
-            if not file.endswith(suffix):
+            if not file.endswith(suffixes):
                 continue
             
             full_path = os.path.join(root, file)
