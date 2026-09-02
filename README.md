@@ -39,7 +39,7 @@
 ```yaml
 services:
   jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.1.4
+    image: drumsergio/jellyfin-encoder:1.3.1
     container_name: jellyfin-encoder
     devices:
       - /dev/dri:/dev/dri  # Intel QSV -- remove if using NVIDIA or software encoding
@@ -51,6 +51,7 @@ services:
       HW_ENCODING_TYPE: "intel"   # nvidia | intel
       ENCODING_QUALITY: "LOW"     # LOW | MEDIUM | HIGH
       ENCODING_CODEC: "hevc"      # hevc | av1
+      POLL_INTERVAL: "60"         # seconds between scans of the source tree
     restart: always
 
     # For NVIDIA GPU support, replace the devices block above with:
@@ -73,8 +74,9 @@ docker run -d \
   -e HW_ENCODING_TYPE=intel \
   -e ENCODING_CODEC=hevc \
   -e ENCODING_QUALITY=LOW \
+  -e POLL_INTERVAL=60 \
   --restart always \
-  drumsergio/jellyfin-encoder:1.1.4
+  drumsergio/jellyfin-encoder:1.3.1
 ```
 
 ## Configuration
@@ -210,7 +212,7 @@ Set `SYMLINK_MANIFEST_TARGET` to the path prefix as seen **inside the Jellyfin c
 ```yaml
 services:
   jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.1.4
+    image: drumsergio/jellyfin-encoder:1.3.1
     environment:
       SYMLINK_MANIFEST_TARGET: "/media-720/Peliculas"  # Jellyfin container path
       # ...other settings
@@ -284,22 +286,34 @@ Key design decisions:
 
 ### Polling interval
 
-Every poll takes a snapshot of the whole source tree: one `stat` for every file and
-folder under `SOURCE_FOLDER`. On a local disk that is cheap. On a network share holding
-tens of thousands of files it is about a minute of metadata traffic per poll, and the
-watcher starts the next snapshot as soon as the last one finishes, so a short interval
-keeps the file server busy around the clock.
+Every poll takes a snapshot of the whole source tree: one `stat` for every file and folder
+under `SOURCE_FOLDER`. The watcher waits `POLL_INTERVAL` seconds first and takes the
+snapshot second, so one cycle costs the interval plus the scan, and that same sum is the
+longest a new file can sit in the source folder before the encoder sees it.
 
-`POLL_INTERVAL` is the number of seconds the watcher waits between snapshots. It defaults
-to 60. Lower it for a small library on local disk where a new file should be picked up at
-once. Raise it to 300 or 600 for a large library on NFS or CIFS, where the cost of a scan
-matters more than noticing a new file a few minutes sooner. Encoding one film takes longer
-than any of these intervals, so the wait is not what decides throughput.
+On a local disk the scan is cheap. On a network share holding tens of thousands of files
+it is not, and a short interval buys almost nothing: the scan takes far longer than the
+pause between scans, so the pause was never what decided how quickly a new file was found,
+while the file server answers metadata requests around the clock.
+
+`POLL_INTERVAL` defaults to 60. Before it existed the watcher polled roughly once a
+second, so an upgrade that sets nothing moves detection from about a second to about a
+minute plus one scan. Lower it, to 1 or to a fraction, for a small library on local disk
+where a new file should be picked up at once. Raise it to 300 or 600 for a large library
+on NFS or CIFS, where the cost of a scan matters more than noticing a new file a few
+minutes sooner. Encoding one film takes longer than any of these intervals, so the wait is
+not what decides throughput. A value that cannot be read as a number, or that is not a
+finite number above zero, logs a warning and falls back to 60, so `0` is not a way to poll
+continuously. The effective value is printed in the `Config:` line at startup.
 
 A rename inside the source folder arrives as a move rather than a create, because the
 watcher matches files by inode and sees the same file under a new name. Both are handled:
 a download finishing its rename from `.part` or `.!qB` into `.mkv`, a folder renamed by
-hand, and a file copied in from outside all reach the encoder.
+hand, and a file copied in from outside all reach the encoder. On a share that does not
+report stable inodes the rename is seen as a delete followed by a create instead, which
+the encoder also handles, so the file is encoded either way. Renaming a folder encodes its
+contents again under the new path, and the encodes left behind under the old name are
+removed by the next cleanup pass.
 
 ## Utilities
 

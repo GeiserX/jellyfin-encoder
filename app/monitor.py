@@ -1,6 +1,7 @@
 import time
 import os
 import sys
+import math
 import logging
 import platform
 if platform.system() != 'Windows':
@@ -341,19 +342,22 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 def _parse_poll_interval(value, default=60.0):
     """Seconds to wait between polls of the source tree.
 
-    One poll stats every entry under SOURCE_FOLDER.  On a network share with
-    tens of thousands of files that is a minute of metadata traffic, so the
-    interval is the knob that decides how hard this container leans on the
-    server.  A bad value must never stop the encoder from starting, so
-    anything unparseable or not above zero falls back to the default.
+    One poll stats every entry under SOURCE_FOLDER, so on a network share
+    holding tens of thousands of files this interval is the knob that decides
+    how hard the container leans on the file server.  A bad value must never
+    stop the encoder from starting, so anything unparseable, or not a finite
+    number above zero, falls back to the default.  Infinity matters as much as
+    zero here: the observer waits the interval before every snapshot, so an
+    infinite one would leave the container running and watching nothing.
     """
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         logging.warning(f'Invalid POLL_INTERVAL "{value}" - using {default:g}s.')
         return default
-    if not parsed > 0:  # rejects zero, negatives and NaN
-        logging.warning(f'POLL_INTERVAL must be above zero, got "{value}" - using {default:g}s.')
+    if not (parsed > 0 and math.isfinite(parsed)):  # rejects zero, negatives, NaN and inf
+        logging.warning(
+            f'POLL_INTERVAL must be a finite number above zero, got "{value}" - using {default:g}s.')
         return default
     return parsed
 

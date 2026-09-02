@@ -79,7 +79,7 @@ class TestVideoHandlerOnCreated(TempDirTestBase):
         handler = monitor.VideoHandler()
         event = MagicMock()
         event.is_directory = True
-        event.src_path = os.path.join(self.source_dir, 'subdir')
+        event.src_path = os.path.join(self.source_dir, 'Movie.2024.mkv')
         with patch.object(monitor, 'submit_encoding_task') as mock_submit:
             handler.on_created(event)
             mock_submit.assert_not_called()
@@ -108,10 +108,15 @@ class TestVideoHandlerOnCreated(TempDirTestBase):
 class TestVideoHandlerOnDeletedDirectory(TempDirTestBase):
 
     def test_ignores_directory_events(self):
+        # A folder named like a video file, so the extension check cannot be
+        # what stops the delete, and a real file alongside it so the mount
+        # health check passes.  That leaves the directory guard.
         handler = monitor.VideoHandler()
+        with open(os.path.join(self.source_dir, 'other.mkv'), 'wb') as f:
+            f.write(b'video')
         event = MagicMock()
         event.is_directory = True
-        event.src_path = os.path.join(self.source_dir, 'subdir')
+        event.src_path = os.path.join(self.source_dir, 'Movie.2024.mkv')
         with patch.object(monitor, 'delete_encoded_video') as mock_del:
             handler.on_deleted(event)
             mock_del.assert_not_called()
