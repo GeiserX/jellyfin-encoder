@@ -336,12 +336,50 @@ _DELETE_BURST_WINDOW = 60  # seconds
 _delete_event_times = []
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+# Longest accepted POLL_INTERVAL.  The observer waits the interval before
+# every snapshot, so anything longer is indistinguishable from not watching:
+# a day between scans already means the periodic full rescan is what finds new
+# files, not the watcher.
+MAX_POLL_INTERVAL = 86400.0
+
+
+def _parse_poll_interval(value, default=60.0):
+    """Seconds to wait between polls of the source tree.
+
+    One poll stats every entry under SOURCE_FOLDER, so on a network share
+    holding tens of thousands of files this interval is the knob that decides
+    how hard the container leans on the file server.  A bad value must never
+    stop the encoder from starting, so anything unparseable, or outside
+    0 < value <= MAX_POLL_INTERVAL, falls back to the default.  The upper end
+    matters as much as zero: 1e9 seconds, or 600000000 typed for 600, would
+    leave the container running and watching nothing, and so would inf.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        logging.warning(f'Invalid POLL_INTERVAL "{value}" - using {default:g}s.')
+        return default
+    # Rejects zero, negatives, NaN (every comparison is False), inf and typos
+    # like 1e999, which float() silently overflows to inf.
+    if not 0 < parsed <= MAX_POLL_INTERVAL:
+        logging.warning(
+            f'POLL_INTERVAL must be above zero and no more than '
+            f'{MAX_POLL_INTERVAL:g}s, got "{value}" - using {default:g}s.')
+        return default
+    return parsed
+
+
+POLL_INTERVAL = _parse_poll_interval(os.getenv('POLL_INTERVAL', '60'))
+
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
              f'CODEC={resolve_codec()}, CONTAINER={resolve_container()}, QUALITY={ENCODING_QUALITY}, '
              f'HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
              f'AUDIO={AUDIO_CODEC}/{AUDIO_BITRATE}/{AUDIO_CHANNELS}ch, '
              f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}, '
-             f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}')
+             f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}, '
+             f'POLL_INTERVAL={POLL_INTERVAL:g}s')
 
 
 class VideoHandler(FileSystemEventHandler):
@@ -351,6 +389,25 @@ class VideoHandler(FileSystemEventHandler):
         if is_video_file(event.src_path):
             logging.info(f'New video file detected: {event.src_path}')
             submit_encoding_task(event.src_path)
+
+    def on_moved(self, event):
+        # The polling observer matches files by inode, so a rename inside the
+        # source tree arrives as a move rather than a create.  Without this
+        # handler a download finishing its rename into the final name (.part or
+        # .!qB to .mkv), a renamed folder or a rename by hand would go unencoded
+        # until the container restarts and rescans.  A rename that starts and
+        # finishes between two snapshots is reported as a plain create of the
+        # final name instead, which on_created already handles.
+        #
+        # The encode that belonged to the old name is an orphan now and the
+        # periodic cleanup_destination() removes it, exactly as it does today
+        # when a source is renamed and the container later restarts.
+        if event.is_directory:
+            # A renamed folder also delivers one move per file inside it.
+            return
+        if is_video_file(event.dest_path):
+            logging.info(f'Video file moved into place: {event.src_path} -> {event.dest_path}')
+            submit_encoding_task(event.dest_path)
 
     def on_deleted(self, event):
         if event.is_directory:
@@ -1182,6 +1239,22 @@ def cleanup_orphaned_symlinks():
 
 CLEANUP_INTERVAL_HOURS = int(os.getenv('CLEANUP_INTERVAL_HOURS', '6'))
 
+
+def create_observer(handler):
+    """Watch SOURCE_FOLDER, taking one snapshot every POLL_INTERVAL seconds."""
+    observer = PollingObserver(timeout=POLL_INTERVAL)
+    observer.schedule(handler, path=SOURCE_FOLDER, recursive=True)
+    return observer
+
+
+def start_monitoring():
+    """Wire VideoHandler to the polling observer and start watching."""
+    observer = create_observer(VideoHandler())
+    observer.start()
+    logging.info(f'Monitoring started (polling every {POLL_INTERVAL:g}s).')
+    return observer
+
+
 if __name__ == "__main__":
     freeze_support()
     manager = Manager()
@@ -1201,12 +1274,7 @@ if __name__ == "__main__":
     _manifest_full_sync()
     cleanup_destination()
     cleanup_orphaned_symlinks()
-    event_handler = VideoHandler()
-    observer = PollingObserver()
-    observer.schedule(event_handler, path=SOURCE_FOLDER, recursive=True)
-    observer.start()
-
-    logging.info('Monitoring started.')
+    observer = start_monitoring()
     for file_path in scan_source_directory():
         submit_encoding_task(file_path)
 

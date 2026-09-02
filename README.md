@@ -21,7 +21,7 @@
 
 ## Features
 
-- **Automatic folder monitoring** -- watches source directories for new and deleted files using polling (NFS/CIFS compatible)
+- **Automatic folder monitoring** -- watches source directories for new, renamed and deleted files using polling (NFS/CIFS compatible)
 - **Hardware-accelerated encoding** -- NVIDIA NVENC and Intel Quick Sync Video (QSV), with transparent software fallback (libx265 / libx264 / libsvtav1)
 - **Smart skip logic** -- detects files already at 720p or lower via filename heuristics and ffprobe resolution analysis
 - **Jellyfin multi-version support** -- creates version symlinks so Jellyfin presents both original and transcoded copies to the user
@@ -39,7 +39,7 @@
 ```yaml
 services:
   jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.1.4
+    image: drumsergio/jellyfin-encoder:1.4.0
     container_name: jellyfin-encoder
     devices:
       - /dev/dri:/dev/dri  # Intel QSV -- remove if using NVIDIA or software encoding
@@ -51,6 +51,7 @@ services:
       HW_ENCODING_TYPE: "intel"   # nvidia | intel
       ENCODING_QUALITY: "LOW"     # LOW | MEDIUM | HIGH
       ENCODING_CODEC: "hevc"      # hevc | av1
+      POLL_INTERVAL: "60"         # seconds between scans of the source tree
     restart: always
 
     # For NVIDIA GPU support, replace the devices block above with:
@@ -73,8 +74,9 @@ docker run -d \
   -e HW_ENCODING_TYPE=intel \
   -e ENCODING_CODEC=hevc \
   -e ENCODING_QUALITY=LOW \
+  -e POLL_INTERVAL=60 \
   --restart always \
-  drumsergio/jellyfin-encoder:1.1.4
+  drumsergio/jellyfin-encoder:1.4.0
 ```
 
 ## Configuration
@@ -97,6 +99,7 @@ All settings are controlled via environment variables.
 | `SYMLINK_MANIFEST_TARGET` | _(empty)_ | Path prefix for cross-host manifest-based symlinks (see [Cross-Host Setup](#cross-host-manifest-mode)) |
 | `SYMLINK_VERSION_SUFFIX` | ` - 720p` | Suffix appended to symlink filenames |
 | `CLEANUP_INTERVAL_HOURS` | `6` | Hours between automatic orphan cleanup runs |
+| `POLL_INTERVAL` | `60` | Seconds the folder watcher waits between scans of the source tree (see [Polling interval](#polling-interval)) |
 
 ## Quality Presets
 
@@ -195,6 +198,17 @@ docker exec jellyfin-encoder python /app/scripts/migrate_encode_names.py
 docker exec jellyfin-encoder python /app/scripts/migrate_encode_names.py --apply
 ```
 
+### Upgrading to 1.4.0
+
+Two behaviours change for an existing install; both are described under
+[Polling interval](#polling-interval).
+
+- The source tree is scanned every 60 seconds instead of every second. Set
+  `POLL_INTERVAL=1` to keep the old cadence.
+- A video renamed inside the source tree, or a renamed folder, is now encoded under its
+  new name within one poll. Before, it waited for the next container restart. The encode
+  that belonged to the old name is removed by the periodic cleanup, as it always was.
+
 ## Cross-Host Manifest Mode
 
 When the encoder and Jellyfin run on **different hosts** (e.g., encoder on a NAS, Jellyfin on another server connected via CIFS/SMB), real symlinks cannot be created over the network mount. The manifest mode solves this:
@@ -209,7 +223,7 @@ Set `SYMLINK_MANIFEST_TARGET` to the path prefix as seen **inside the Jellyfin c
 ```yaml
 services:
   jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.1.4
+    image: drumsergio/jellyfin-encoder:1.4.0
     environment:
       SYMLINK_MANIFEST_TARGET: "/media-720/Peliculas"  # Jellyfin container path
       # ...other settings
@@ -258,7 +272,7 @@ Both modes can coexist. If only `SYMLINK_MANIFEST_TARGET` is set, symlinks are m
 Source folder (polling observer)
         |
         v
-  New file detected ──> Wait for file completion (size-stable for 60s)
+  New or renamed file detected ──> Wait for file completion (size-stable for 60s)
         |
         v
   Resolution check ──> Skip if <= 720p
@@ -280,6 +294,29 @@ Key design decisions:
 - **File-growth detection** -- before deleting stale `.tmp` files, the cleanup routine checks whether the file is still being written by another instance.
 - **ProcessPoolExecutor** -- one worker for hardware encoding (GPU is the bottleneck), multiple workers for software encoding (CPU-bound).
 - **Container-agnostic output lookup** -- an encode is located by filename stem across every container the tool writes, so changing codec or container never re-encodes a library that is already done.
+
+### Polling interval
+
+Every poll takes a snapshot of the whole source tree: one `stat` for every file and folder
+under `SOURCE_FOLDER`. The watcher waits `POLL_INTERVAL` seconds, takes the snapshot, and
+reports what changed since the previous one. A new file is therefore noticed within one
+interval plus one snapshot.
+
+On a local disk a snapshot is cheap. On a network share holding tens of thousands of files it
+is not: a snapshot of a 54k-entry CIFS tree took about 80 seconds, and with the old
+one-second wait the file server answered around 1,500 metadata requests per second around
+the clock for nothing. `POLL_INTERVAL` defaults to 60. Raise it to 300 or 600 for a large
+library on NFS or CIFS; encoding one film takes longer than any of these intervals, so the
+wait never decides throughput. A value that is not a number, not above zero, or above
+86400 logs a warning and falls back to 60. The startup `Config:` line prints the value in
+use.
+
+The watcher matches files by inode, so a rename inside the source tree arrives as a move: a
+download finishing its rename from `.part` or `.!qB` into `.mkv`, a folder renamed by hand,
+or a file renamed by hand is encoded under its new name. A file copied in from outside is a
+plain create and is handled the same way. Renaming a folder re-encodes every video inside
+it, because encodes are located by their source path; the old encodes are orphans and the
+periodic cleanup removes them.
 
 ## Utilities
 
