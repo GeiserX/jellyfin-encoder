@@ -14,6 +14,7 @@ services:
       SOURCE_FOLDER: "/app/source"
       DEST_FOLDER: "/app/destination"
       ENCODING_CODEC: "hevc"
+      POLL_INTERVAL: "60"   # seconds between scans of the source tree
     restart: always
     # For NVIDIA GPU support, uncomment below:
     # deploy:

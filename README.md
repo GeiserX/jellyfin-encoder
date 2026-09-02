@@ -21,7 +21,7 @@
 
 ## Features
 
-- **Automatic folder monitoring** -- watches source directories for new and deleted files using polling (NFS/CIFS compatible)
+- **Automatic folder monitoring** -- watches source directories for new, renamed and deleted files using polling (NFS/CIFS compatible)
 - **Hardware-accelerated encoding** -- NVIDIA NVENC and Intel Quick Sync Video (QSV), with transparent software fallback (libx265 / libx264 / libsvtav1)
 - **Smart skip logic** -- detects files already at 720p or lower via filename heuristics and ffprobe resolution analysis
 - **Jellyfin multi-version support** -- creates version symlinks so Jellyfin presents both original and transcoded copies to the user
@@ -97,6 +97,7 @@ All settings are controlled via environment variables.
 | `SYMLINK_MANIFEST_TARGET` | _(empty)_ | Path prefix for cross-host manifest-based symlinks (see [Cross-Host Setup](#cross-host-manifest-mode)) |
 | `SYMLINK_VERSION_SUFFIX` | ` - 720p` | Suffix appended to symlink filenames |
 | `CLEANUP_INTERVAL_HOURS` | `6` | Hours between automatic orphan cleanup runs |
+| `POLL_INTERVAL` | `60` | Seconds the folder watcher waits between scans of the source tree (see [Polling interval](#polling-interval)) |
 
 ## Quality Presets
 
@@ -258,7 +259,7 @@ Both modes can coexist. If only `SYMLINK_MANIFEST_TARGET` is set, symlinks are m
 Source folder (polling observer)
         |
         v
-  New file detected ──> Wait for file completion (size-stable for 60s)
+  New or renamed file detected ──> Wait for file completion (size-stable for 60s)
         |
         v
   Resolution check ──> Skip if <= 720p
@@ -280,6 +281,25 @@ Key design decisions:
 - **File-growth detection** -- before deleting stale `.tmp` files, the cleanup routine checks whether the file is still being written by another instance.
 - **ProcessPoolExecutor** -- one worker for hardware encoding (GPU is the bottleneck), multiple workers for software encoding (CPU-bound).
 - **Container-agnostic output lookup** -- an encode is located by filename stem across every container the tool writes, so changing codec or container never re-encodes a library that is already done.
+
+### Polling interval
+
+Every poll takes a snapshot of the whole source tree: one `stat` for every file and
+folder under `SOURCE_FOLDER`. On a local disk that is cheap. On a network share holding
+tens of thousands of files it is about a minute of metadata traffic per poll, and the
+watcher starts the next snapshot as soon as the last one finishes, so a short interval
+keeps the file server busy around the clock.
+
+`POLL_INTERVAL` is the number of seconds the watcher waits between snapshots. It defaults
+to 60. Lower it for a small library on local disk where a new file should be picked up at
+once. Raise it to 300 or 600 for a large library on NFS or CIFS, where the cost of a scan
+matters more than noticing a new file a few minutes sooner. Encoding one film takes longer
+than any of these intervals, so the wait is not what decides throughput.
+
+A rename inside the source folder arrives as a move rather than a create, because the
+watcher matches files by inode and sees the same file under a new name. Both are handled:
+a download finishing its rename from `.part` or `.!qB` into `.mkv`, a folder renamed by
+hand, and a file copied in from outside all reach the encoder.
 
 ## Utilities
 
