@@ -419,7 +419,9 @@ class VideoHandler(FileSystemEventHandler):
             return
         logging.info(f'Video file moved: {event.src_path} -> {event.dest_path}')
         if old_is_video:
-            delete_encoded_video(event.src_path)
+            # include_temp=False: an encode of the old name may still be
+            # running, and its .tmp is not what the library shows.
+            delete_encoded_video(event.src_path, include_temp=False)
         if new_is_video:
             submit_encoding_task(event.dest_path)
 
@@ -996,7 +998,16 @@ def delete_version_symlink(source_path):
         logging.error(f'Failed to delete version symlink for {source_path}: {e}')
 
 
-def delete_encoded_video(source_path):
+def delete_encoded_video(source_path, include_temp=True):
+    """Remove the encode that belonged to source_path.
+
+    With include_temp=False a half-written `.tmp` is left alone.  A rename uses
+    that: the old name can still have an encode in flight, and unlinking the
+    file under a running FFmpeg makes it write to an inode nobody can reach and
+    then fail at the publish step, inside a worker process whose exception
+    nobody reads.  A `.tmp` is never visible in the library anyway, and
+    cleanup_destination removes stale ones once they stop growing.
+    """
     relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
     dest_path = os.path.join(DEST_FOLDER, relative_path)
     dest_dir = os.path.dirname(dest_path)
@@ -1012,7 +1023,8 @@ def delete_encoded_video(source_path):
 
     # The encode may sit in any container this tool has written.
     for encoded_file in output_candidate_paths(dest_dir, output_name):
-        for f in [encoded_file, encoded_file + ".tmp"]:
+        candidates = [encoded_file] + ([encoded_file + ".tmp"] if include_temp else [])
+        for f in candidates:
             if os.path.exists(f):
                 os.remove(f)
                 logging.info(f'Deleted: {f}')

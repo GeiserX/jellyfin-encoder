@@ -283,6 +283,24 @@ class TestRenameLeavesNoStaleEncode(TempDirTestBase):
         self.assertEqual(self._encodes_left(), [])
         mock_submit.assert_called_once_with(self.new_source)
 
+    def test_an_encode_still_running_under_the_old_name_is_left_alone(self):
+        """A rename can land while FFmpeg is still writing the old encode.
+
+        Unlinking that `.tmp` leaves FFmpeg writing to an inode nothing can
+        reach and failing at the publish step, inside a worker process whose
+        exception nobody reads.  A `.tmp` is not what the library shows, so it
+        stays for cleanup_destination, which checks whether it is still
+        growing.  The published encode still goes.
+        """
+        half_written = self._touch(
+            self.dest_dir,
+            os.path.join('Movie (2024)', 'a.1080p - 720p.mkv.tmp'), b'half')
+        with patch.object(monitor, 'submit_encoding_task'):
+            monitor.VideoHandler().dispatch(
+                FileMovedEvent(self.old_source, self.new_source))
+        self.assertEqual(self._encodes_left(),
+                         [os.path.relpath(half_written, self.dest_dir)])
+
     def test_reported_as_a_delete_plus_a_create(self):
         handler = monitor.VideoHandler()
         with patch.object(monitor, 'submit_encoding_task') as mock_submit:
