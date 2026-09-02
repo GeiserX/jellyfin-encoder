@@ -1,7 +1,6 @@
 import time
 import os
 import sys
-import math
 import logging
 import platform
 if platform.system() != 'Windows':
@@ -339,25 +338,35 @@ _delete_event_times = []
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
+# Longest accepted POLL_INTERVAL.  The observer waits the interval before
+# every snapshot, so anything longer is indistinguishable from not watching:
+# a day between scans already means the periodic full rescan is what finds new
+# files, not the watcher.
+MAX_POLL_INTERVAL = 86400.0
+
+
 def _parse_poll_interval(value, default=60.0):
     """Seconds to wait between polls of the source tree.
 
     One poll stats every entry under SOURCE_FOLDER, so on a network share
     holding tens of thousands of files this interval is the knob that decides
     how hard the container leans on the file server.  A bad value must never
-    stop the encoder from starting, so anything unparseable, or not a finite
-    number above zero, falls back to the default.  Infinity matters as much as
-    zero here: the observer waits the interval before every snapshot, so an
-    infinite one would leave the container running and watching nothing.
+    stop the encoder from starting, so anything unparseable, or outside
+    0 < value <= MAX_POLL_INTERVAL, falls back to the default.  The upper end
+    matters as much as zero: 1e9 seconds, or 600000000 typed for 600, would
+    leave the container running and watching nothing, and so would inf.
     """
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         logging.warning(f'Invalid POLL_INTERVAL "{value}" - using {default:g}s.')
         return default
-    if not (parsed > 0 and math.isfinite(parsed)):  # rejects zero, negatives, NaN and inf
+    # Rejects zero, negatives, NaN (every comparison is False), inf and typos
+    # like 1e999, which float() silently overflows to inf.
+    if not 0 < parsed <= MAX_POLL_INTERVAL:
         logging.warning(
-            f'POLL_INTERVAL must be a finite number above zero, got "{value}" - using {default:g}s.')
+            f'POLL_INTERVAL must be above zero and no more than '
+            f'{MAX_POLL_INTERVAL:g}s, got "{value}" - using {default:g}s.')
         return default
     return parsed
 
@@ -382,18 +391,36 @@ class VideoHandler(FileSystemEventHandler):
             submit_encoding_task(event.src_path)
 
     def on_moved(self, event):
-        # A rename inside the source tree arrives as a move, never as a create:
-        # the polling observer matches files by inode, so it sees the same file
-        # under a new name.  Without this, a download finishing its rename into
-        # the final name (.part or .!qB to .mkv), a renamed folder or a rename
-        # by hand would never be encoded until the container restarts and
-        # rescans.  The encode left behind under the old name has no source any
-        # more and the periodic cleanup removes it.
+        # A rename inside the source tree usually arrives as a move rather than
+        # a create: the polling observer matches files by inode, so it sees the
+        # same file under a new name.  Only usually, because a rename that
+        # starts and finishes between two snapshots is reported as a plain
+        # create of the final name, and a share that does not keep inodes
+        # stable reports a delete plus a create.  Without this handler a
+        # download finishing its rename into the final name (.part or .!qB to
+        # .mkv), a renamed folder or a rename by hand would go unencoded until
+        # the container restarts and rescans.
+        #
+        # The encode under the old name has lost its source, so it goes now
+        # instead of waiting for the periodic cleanup, up to
+        # CLEANUP_INTERVAL_HOURS later (6 by default), which would leave two
+        # 720p versions of one film side by side in the destination until then.
+        # It also makes the outcome the same whichever way the rename was
+        # reported: the delete-plus-create path already does this.  Neither the
+        # mount-health check nor the delete-burst limiter that on_deleted needs
+        # applies here: a move is proof the mount answered and that this one
+        # file moved rather than vanished.
         if event.is_directory:
+            # A renamed folder also delivers one move per file inside it.
             return
-        if is_video_file(event.dest_path):
-            logging.info(
-                f'Video file moved into place: {event.src_path} -> {event.dest_path}')
+        old_is_video = is_video_file(event.src_path)
+        new_is_video = is_video_file(event.dest_path)
+        if not (old_is_video or new_is_video):
+            return
+        logging.info(f'Video file moved: {event.src_path} -> {event.dest_path}')
+        if old_is_video:
+            delete_encoded_video(event.src_path)
+        if new_is_video:
             submit_encoding_task(event.dest_path)
 
     def on_deleted(self, event):
@@ -1234,6 +1261,14 @@ def create_observer(handler):
     return observer
 
 
+def start_monitoring():
+    """Wire VideoHandler to the polling observer and start watching."""
+    observer = create_observer(VideoHandler())
+    observer.start()
+    logging.info(f'Monitoring started (polling every {POLL_INTERVAL:g}s).')
+    return observer
+
+
 if __name__ == "__main__":
     freeze_support()
     manager = Manager()
@@ -1253,11 +1288,7 @@ if __name__ == "__main__":
     _manifest_full_sync()
     cleanup_destination()
     cleanup_orphaned_symlinks()
-    event_handler = VideoHandler()
-    observer = create_observer(event_handler)
-    observer.start()
-
-    logging.info(f'Monitoring started (polling every {POLL_INTERVAL:g}s).')
+    observer = start_monitoring()
     for file_path in scan_source_directory():
         submit_encoding_task(file_path)
 
