@@ -8,6 +8,7 @@ if platform.system() != 'Windows':
 else:
     import msvcrt
 
+import shutil
 import subprocess
 import concurrent.futures
 from multiprocessing import Manager, freeze_support
@@ -373,6 +374,31 @@ def _parse_poll_interval(value, default=60.0):
 
 POLL_INTERVAL = _parse_poll_interval(os.getenv('POLL_INTERVAL', '60'))
 
+
+def _parse_dest_min_free_gb(value, default=0.0):
+    """Free-space floor for DEST_FOLDER, in GB (10^9 bytes); 0 turns it off.
+
+    Anything unparseable, negative, NaN or infinite falls back to the default,
+    for the same reason as POLL_INTERVAL: a typo must never stop the encoder.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        logging.warning(f'Invalid DEST_MIN_FREE_GB "{value}" - using {default:g}.')
+        return default
+    if not 0 <= parsed < float('inf'):
+        logging.warning(f'DEST_MIN_FREE_GB must be a finite number of GB, got "{value}" - using {default:g}.')
+        return default
+    return parsed
+
+
+# While the destination filesystem has less than this free, encode_video() holds each file
+# and re-checks every DEST_MIN_FREE_POLL_SECONDS instead of writing into a nearly full disk.
+# For a destination that shares a disk with something that must never hit ENOSPC.
+DEST_MIN_FREE_GB = _parse_dest_min_free_gb(os.getenv('DEST_MIN_FREE_GB', '0'))
+DEST_MIN_FREE_BYTES = int(DEST_MIN_FREE_GB * 1000 ** 3)
+DEST_MIN_FREE_POLL_SECONDS = 300
+
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
              f'CODEC={resolve_codec()}, CONTAINER={resolve_container()}, QUALITY={ENCODING_QUALITY}, '
              f'HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
@@ -560,6 +586,38 @@ def wait_for_file_completion(filepath, timeout=TIMEOUT):
             logging.info(f'File removed: {filepath}')
             return False
 
+def wait_for_dest_headroom(source_path):
+    """Hold an encode while DEST_FOLDER is under the free-space floor.
+
+    Returns True as soon as the destination has at least DEST_MIN_FREE_BYTES
+    free (immediately when the floor is 0), and False if the source file went
+    away while waiting.  A failure to read the free space never blocks: the
+    encode proceeds and ffmpeg reports whatever is really wrong.
+    """
+    if DEST_MIN_FREE_BYTES <= 0:
+        return True
+    held = False
+    while True:
+        try:
+            free = shutil.disk_usage(DEST_FOLDER).free
+        except OSError as e:
+            logging.warning(f'Cannot read free space of {DEST_FOLDER} ({e}); not holding {source_path}')
+            return True
+        if free >= DEST_MIN_FREE_BYTES:
+            if held:
+                logging.info(f'Destination has {free / 1000 ** 3:.0f} GB free again; resuming {source_path}')
+            return True
+        if not held:
+            logging.warning(
+                f'Destination has {free / 1000 ** 3:.0f} GB free, under the '
+                f'{DEST_MIN_FREE_GB:g} GB floor; holding {source_path} until space returns')
+            held = True
+        time.sleep(DEST_MIN_FREE_POLL_SECONDS)
+        if not os.path.exists(source_path):
+            logging.info(f'Source removed while waiting for space: {source_path}')
+            return False
+
+
 def is_file_growing(file_path, check_interval=10):
     size1 = os.path.getsize(file_path)
     time.sleep(check_interval)
@@ -722,6 +780,8 @@ def encode_video(source_path, processed_files, processing_files):
     processing_files[source_path] = True
 
     try:
+        if not wait_for_dest_headroom(source_path):
+            return
         relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
         dest_path = os.path.join(DEST_FOLDER, relative_path)
         dest_dir = os.path.dirname(dest_path)
