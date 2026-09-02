@@ -44,8 +44,9 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(monitor._parse_dest_min_free_gb('0'), 0.0)
 
     def test_rejects_garbage_and_keeps_the_encoder_starting(self):
-        for bad in ('', 'lots', '-3', 'inf', 'nan', None):
+        for bad in ('', 'lots', '-3', 'inf', 'nan', None, '1e300', '1e999'):
             self.assertEqual(monitor._parse_dest_min_free_gb(bad), 0.0, bad)
+            int(monitor._parse_dest_min_free_gb(bad) * 1000 ** 3)  # the conversion at import must not overflow
 
 
 class WaitForDestHeadroomTests(HeadroomTestBase):
@@ -107,6 +108,22 @@ class EncodeVideoHeadroomTests(HeadroomTestBase):
         popen.assert_not_called()
         self.assertEqual(processing, {}, 'the in-flight flag must be cleared when the encode is abandoned')
         self.assertEqual(os.listdir(self.dest_dir), [], 'nothing may be written under the floor')
+
+    def test_encode_video_rechecks_headroom_after_waiting_for_the_file_to_finish(self):
+        # The file-completion wait can last up to a day, so a floor that held before it
+        # is checked again right before ffmpeg starts.
+        processed, processing = {}, {}
+        with patch.object(monitor, 'is_already_low_quality', return_value=False), \
+             patch.object(monitor, 'SKIP_IF_LOW_QUALITY_EXISTS', False), \
+             patch.object(monitor, 'get_metadata_info', return_value={}), \
+             patch.object(monitor, 'wait_for_file_completion', return_value=True), \
+             patch.object(monitor, 'wait_for_dest_headroom', side_effect=[True, False]) as wait, \
+             patch('subprocess.Popen') as popen:
+            monitor.encode_video(self.source, processed, processing)
+        self.assertEqual(wait.call_count, 2)
+        popen.assert_not_called()
+        self.assertEqual(processing, {})
+        self.assertEqual(os.listdir(self.dest_dir), [])
 
 
 if __name__ == '__main__':

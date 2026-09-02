@@ -189,7 +189,7 @@ The encoder periodically removes orphaned encodes (files in `DEST_FOLDER` with n
 
 ### Free-space floor
 
-`DEST_MIN_FREE_GB=1000` makes the encoder hold each new encode while the destination filesystem has less than 1 TB free, re-check every five minutes, and carry on by itself when space returns. Encodes already running finish. Use it when the destination shares a disk with something that must never see ENOSPC, such as an object store node or a database. The default `0` keeps the old behaviour: encode until the disk is full.
+`DEST_MIN_FREE_GB=1000` makes the encoder hold each new encode while the destination filesystem has less than 1 TB free, re-check every five minutes, and carry on by itself when space returns. Encodes already running finish, and the floor is checked again after the wait for a still-growing source, right before ffmpeg starts. If the free space cannot be read at all, the encode proceeds and ffmpeg reports whatever is really wrong, so the floor is a courtesy to the disk's other tenants, not a guarantee against ENOSPC. Use it when the destination shares a disk with something that must never see ENOSPC, such as an object store node or a database. The default `0` keeps the old behaviour: encode until the disk is full.
 
 ### Upgrading from < 1.1.0
 

@@ -375,6 +375,9 @@ def _parse_poll_interval(value, default=60.0):
 POLL_INTERVAL = _parse_poll_interval(os.getenv('POLL_INTERVAL', '60'))
 
 
+MAX_DEST_MIN_FREE_GB = 1e9  # one exabyte
+
+
 def _parse_dest_min_free_gb(value, default=0.0):
     """Free-space floor for DEST_FOLDER, in GB (10^9 bytes); 0 turns it off.
 
@@ -386,8 +389,12 @@ def _parse_dest_min_free_gb(value, default=0.0):
     except (TypeError, ValueError):
         logging.warning(f'Invalid DEST_MIN_FREE_GB "{value}" - using {default:g}.')
         return default
-    if not 0 <= parsed < float('inf'):
-        logging.warning(f'DEST_MIN_FREE_GB must be a finite number of GB, got "{value}" - using {default:g}.')
+    # The upper bound keeps the byte conversion below what a float can hold (1e300 GB would
+    # overflow to infinity and stop the encoder at import) and is still a thousand times any
+    # array that exists.
+    if not 0 <= parsed <= MAX_DEST_MIN_FREE_GB:
+        logging.warning(
+            f'DEST_MIN_FREE_GB must be between 0 and {MAX_DEST_MIN_FREE_GB:g} GB, got "{value}" - using {default:g}.')
         return default
     return parsed
 
@@ -837,6 +844,11 @@ def encode_video(source_path, processed_files, processing_files):
             os.remove(corrupt)
 
         if not wait_for_file_completion(source_path):
+            return
+
+        # The wait above can last up to a day for a file still being written, so the floor
+        # is checked again here, right before anything is written to the destination.
+        if not wait_for_dest_headroom(source_path):
             return
 
         quality_settings = {
