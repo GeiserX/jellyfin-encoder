@@ -391,38 +391,22 @@ class VideoHandler(FileSystemEventHandler):
             submit_encoding_task(event.src_path)
 
     def on_moved(self, event):
-        # A rename inside the source tree usually arrives as a move rather than
-        # a create: the polling observer matches files by inode, so it sees the
-        # same file under a new name.  Only usually, because a rename that
-        # starts and finishes between two snapshots is reported as a plain
-        # create of the final name, and a share that does not keep inodes
-        # stable reports a delete plus a create.  Without this handler a
-        # download finishing its rename into the final name (.part or .!qB to
-        # .mkv), a renamed folder or a rename by hand would go unencoded until
-        # the container restarts and rescans.
+        # The polling observer matches files by inode, so a rename inside the
+        # source tree arrives as a move rather than a create.  Without this
+        # handler a download finishing its rename into the final name (.part or
+        # .!qB to .mkv), a renamed folder or a rename by hand would go unencoded
+        # until the container restarts and rescans.  A rename that starts and
+        # finishes between two snapshots is reported as a plain create of the
+        # final name instead, which on_created already handles.
         #
-        # The encode under the old name has lost its source, so it goes now
-        # instead of waiting for the periodic cleanup, up to
-        # CLEANUP_INTERVAL_HOURS later (6 by default), which would leave two
-        # 720p versions of one film side by side in the destination until then.
-        # It also makes the outcome the same whichever way the rename was
-        # reported: the delete-plus-create path already does this.  Neither the
-        # mount-health check nor the delete-burst limiter that on_deleted needs
-        # applies here: a move is proof the mount answered and that this one
-        # file moved rather than vanished.
+        # The encode that belonged to the old name is an orphan now and the
+        # periodic cleanup_destination() removes it, exactly as it does today
+        # when a source is renamed and the container later restarts.
         if event.is_directory:
             # A renamed folder also delivers one move per file inside it.
             return
-        old_is_video = is_video_file(event.src_path)
-        new_is_video = is_video_file(event.dest_path)
-        if not (old_is_video or new_is_video):
-            return
-        logging.info(f'Video file moved: {event.src_path} -> {event.dest_path}')
-        if old_is_video:
-            # include_temp=False: an encode of the old name may still be
-            # running, and its .tmp is not what the library shows.
-            delete_encoded_video(event.src_path, include_temp=False)
-        if new_is_video:
+        if is_video_file(event.dest_path):
+            logging.info(f'Video file moved into place: {event.src_path} -> {event.dest_path}')
             submit_encoding_task(event.dest_path)
 
     def on_deleted(self, event):
@@ -998,16 +982,7 @@ def delete_version_symlink(source_path):
         logging.error(f'Failed to delete version symlink for {source_path}: {e}')
 
 
-def delete_encoded_video(source_path, include_temp=True):
-    """Remove the encode that belonged to source_path.
-
-    With include_temp=False a half-written `.tmp` is left alone.  A rename uses
-    that: the old name can still have an encode in flight, and unlinking the
-    file under a running FFmpeg makes it write to an inode nobody can reach and
-    then fail at the publish step, inside a worker process whose exception
-    nobody reads.  A `.tmp` is never visible in the library anyway, and
-    cleanup_destination removes stale ones once they stop growing.
-    """
+def delete_encoded_video(source_path):
     relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
     dest_path = os.path.join(DEST_FOLDER, relative_path)
     dest_dir = os.path.dirname(dest_path)
@@ -1023,8 +998,7 @@ def delete_encoded_video(source_path, include_temp=True):
 
     # The encode may sit in any container this tool has written.
     for encoded_file in output_candidate_paths(dest_dir, output_name):
-        candidates = [encoded_file] + ([encoded_file + ".tmp"] if include_temp else [])
-        for f in candidates:
+        for f in [encoded_file, encoded_file + ".tmp"]:
             if os.path.exists(f):
                 os.remove(f)
                 logging.info(f'Deleted: {f}')

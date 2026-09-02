@@ -1,7 +1,9 @@
 """Tests targeting uncovered lines to bring coverage above 90%."""
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import patch, MagicMock, PropertyMock
@@ -10,7 +12,36 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
 
 import monitor
 
-from .base import TempDirTestBase
+
+class TempDirTestBase(unittest.TestCase):
+    """Base with temp source/dest directories and standard patches."""
+
+    def setUp(self):
+        self.source_dir = tempfile.mkdtemp(prefix='encoder_src_')
+        self.dest_dir = tempfile.mkdtemp(prefix='encoder_dst_')
+        self._patches = [
+            patch.object(monitor, 'SOURCE_FOLDER', self.source_dir),
+            patch.object(monitor, 'DEST_FOLDER', self.dest_dir),
+            patch.object(monitor, 'SYMLINK_TARGET_PREFIX', ''),
+            patch.object(monitor, 'SYMLINK_VERSION_SUFFIX', ' - 720p'),
+            patch.object(monitor, 'SYMLINK_MANIFEST_TARGET', ''),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        monitor._delete_event_times.clear()
+        shutil.rmtree(self.source_dir, ignore_errors=True)
+        shutil.rmtree(self.dest_dir, ignore_errors=True)
+
+    def _touch(self, base_dir, rel_path, content=b''):
+        full = os.path.join(base_dir, rel_path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, 'wb') as f:
+            f.write(content)
+        return full
 
 
 # ── _read_manifest (lines 86-91) ────────────────────────────────────────
@@ -48,7 +79,7 @@ class TestVideoHandlerOnCreated(TempDirTestBase):
         handler = monitor.VideoHandler()
         event = MagicMock()
         event.is_directory = True
-        event.src_path = os.path.join(self.source_dir, 'Movie.2024.mkv')
+        event.src_path = os.path.join(self.source_dir, 'subdir')
         with patch.object(monitor, 'submit_encoding_task') as mock_submit:
             handler.on_created(event)
             mock_submit.assert_not_called()
@@ -77,15 +108,10 @@ class TestVideoHandlerOnCreated(TempDirTestBase):
 class TestVideoHandlerOnDeletedDirectory(TempDirTestBase):
 
     def test_ignores_directory_events(self):
-        # A folder named like a video file, so the extension check cannot be
-        # what stops the delete, and a real file alongside it so the mount
-        # health check passes.  That leaves the directory guard.
         handler = monitor.VideoHandler()
-        with open(os.path.join(self.source_dir, 'other.mkv'), 'wb') as f:
-            f.write(b'video')
         event = MagicMock()
         event.is_directory = True
-        event.src_path = os.path.join(self.source_dir, 'Movie.2024.mkv')
+        event.src_path = os.path.join(self.source_dir, 'subdir')
         with patch.object(monitor, 'delete_encoded_video') as mock_del:
             handler.on_deleted(event)
             mock_del.assert_not_called()

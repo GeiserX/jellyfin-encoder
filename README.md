@@ -39,7 +39,7 @@
 ```yaml
 services:
   jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.3.1
+    image: drumsergio/jellyfin-encoder:1.4.0
     container_name: jellyfin-encoder
     devices:
       - /dev/dri:/dev/dri  # Intel QSV -- remove if using NVIDIA or software encoding
@@ -76,7 +76,7 @@ docker run -d \
   -e ENCODING_QUALITY=LOW \
   -e POLL_INTERVAL=60 \
   --restart always \
-  drumsergio/jellyfin-encoder:1.3.1
+  drumsergio/jellyfin-encoder:1.4.0
 ```
 
 ## Configuration
@@ -198,16 +198,16 @@ docker exec jellyfin-encoder python /app/scripts/migrate_encode_names.py
 docker exec jellyfin-encoder python /app/scripts/migrate_encode_names.py --apply
 ```
 
-### Upgrading to 1.3.1
+### Upgrading to 1.4.0
 
-Two behaviours change for an existing install. Both are described under
+Two behaviours change for an existing install; both are described under
 [Polling interval](#polling-interval).
 
-- The source tree is scanned once a minute instead of once a second. Set
-  `POLL_INTERVAL=1` to keep the old wait.
-- Renaming a source folder now queues every video inside it for encoding under the new
-  path and deletes the encodes that belonged to the old path. Reorganise the library
-  before upgrading, or expect the re-encode.
+- The source tree is scanned every 60 seconds instead of every second. Set
+  `POLL_INTERVAL=1` to keep the old cadence.
+- A video renamed inside the source tree, or a renamed folder, is now encoded under its
+  new name within one poll. Before, it waited for the next container restart. The encode
+  that belonged to the old name is removed by the periodic cleanup, as it always was.
 
 ## Cross-Host Manifest Mode
 
@@ -223,7 +223,7 @@ Set `SYMLINK_MANIFEST_TARGET` to the path prefix as seen **inside the Jellyfin c
 ```yaml
 services:
   jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.3.1
+    image: drumsergio/jellyfin-encoder:1.4.0
     environment:
       SYMLINK_MANIFEST_TARGET: "/media-720/Peliculas"  # Jellyfin container path
       # ...other settings
@@ -272,13 +272,10 @@ Both modes can coexist. If only `SYMLINK_MANIFEST_TARGET` is set, symlinks are m
 Source folder (polling observer)
         |
         v
-  New or renamed file detected
+  New or renamed file detected ──> Wait for file completion (size-stable for 60s)
         |
         v
   Resolution check ──> Skip if <= 720p
-        |
-        v
-  Wait for file completion (size-stable for 60s)
         |
         v
   FFmpeg transcode ──> scale to 720p, encode video and audio, copy/convert subtitles
@@ -301,44 +298,25 @@ Key design decisions:
 ### Polling interval
 
 Every poll takes a snapshot of the whole source tree: one `stat` for every file and folder
-under `SOURCE_FOLDER`. The watcher waits `POLL_INTERVAL` seconds first, takes the snapshot
-second, and reports nothing until that snapshot has finished. A file that lands just after
-the walk has passed its own folder is invisible to the poll that is running, so the longest
-it can sit unseen is the interval plus two scans.
+under `SOURCE_FOLDER`. The watcher waits `POLL_INTERVAL` seconds, takes the snapshot, and
+reports what changed since the previous one. A new file is therefore noticed within one
+interval plus one snapshot.
 
-On a local disk the scan is cheap. On a network share holding tens of thousands of files
-it is not, and a short interval buys almost nothing: the scan takes far longer than the
-pause between scans, so the pause was never what decided how quickly a new file was found,
-while the file server answers metadata requests around the clock.
+On a local disk a snapshot is cheap. On a network share holding tens of thousands of files it
+is not: a snapshot of a 54k-entry CIFS tree took about 80 seconds, and with the old
+one-second wait the file server answered around 1,500 metadata requests per second around
+the clock for nothing. `POLL_INTERVAL` defaults to 60. Raise it to 300 or 600 for a large
+library on NFS or CIFS; encoding one film takes longer than any of these intervals, so the
+wait never decides throughput. A value that is not a number, not above zero, or above
+86400 logs a warning and falls back to 60. The startup `Config:` line prints the value in
+use.
 
-`POLL_INTERVAL` defaults to 60. The watcher used to wait one second between scans, so an
-upgrade that sets nothing makes each pause 59 seconds longer. The scan itself costs what it
-always did, and on a large share, where one scan already takes minutes, 59 seconds is a
-small part of the total. Set `POLL_INTERVAL=1` to keep the old wait. Lower it to 1, or to a
-fraction, for a small library on local disk where a new file should be picked up at once.
-Raise it to 300 or 600 for a large library on NFS or CIFS, where the cost of a scan matters
-more than noticing a new file a few minutes sooner. Encoding one film takes longer than any
-of these intervals, so the wait is not what decides throughput. A value that cannot be read
-as a number, or that is not above zero and at most 86400 (one day), logs a warning and
-falls back to 60. `0` is not a way to poll continuously, and `1e9` is not a way to stop
-polling. The startup `Config:` line prints the value the encoder settled on.
-
-A rename inside the source folder usually arrives as a move rather than a create, because
-the watcher matches files by inode and sees the same file under a new name. A download
-finishing its rename from `.part` or `.!qB` into `.mkv`, a folder renamed by hand, and a
-file copied in from outside all reach the encoder. The handler deletes the encode that
-belonged to the old name as it handles the move, so the library never shows two 720p
-versions of one film. Renaming a folder queues every video inside it under the new path and
-drops their old encodes, so a bulk reorganisation of the library becomes bulk re-encoding
-straight away.
-
-Two cases are not moves. A rename that starts and finishes between two snapshots arrives as
-a plain create of the final name, which reaches the encoder the same way. The second case
-is a mount that does not keep inodes stable. Nothing matches between snapshots there, so
-every poll reports the whole tree as deleted and created again, and queues every file for
-re-encoding. The [delete-burst limiter](#safety--cleanup), 50 deletes per 60 seconds, is
-all that caps it, and nothing caps the encode side. If the log shows deletes and encodes
-for files nobody touched, the mount is the cause.
+The watcher matches files by inode, so a rename inside the source tree arrives as a move: a
+download finishing its rename from `.part` or `.!qB` into `.mkv`, a folder renamed by hand,
+or a file renamed by hand is encoded under its new name. A file copied in from outside is a
+plain create and is handled the same way. Renaming a folder re-encodes every video inside
+it, because encodes are located by their source path; the old encodes are orphans and the
+periodic cleanup removes them.
 
 ## Utilities
 

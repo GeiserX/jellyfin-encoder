@@ -1,6 +1,6 @@
 services:
   jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.3.1
+    image: drumsergio/jellyfin-encoder:1.4.0
     container_name: jellyfin-encoder
     devices:
       - /dev/dri:/dev/dri
