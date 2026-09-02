@@ -110,6 +110,19 @@ def test_create_observer_uses_poll_interval_and_watches_the_source_recursively(t
     assert emitter.watch.is_recursive
 
 
+def test_start_monitoring_returns_a_running_observer_and_says_so(tree, monkeypatch, caplog):
+    monkeypatch.setattr(monitor, 'POLL_INTERVAL', 0.2)
+    with caplog.at_level(logging.INFO):
+        observer = monitor.start_monitoring()
+    try:
+        assert observer.is_alive()
+        assert observer.timeout == 0.2
+        assert 'Monitoring started (polling every 0.2s).' in caplog.text
+    finally:
+        observer.stop()
+        observer.join(timeout=10)
+
+
 def test_main_starts_monitoring_with_the_configured_interval(tmp_path):
     """Run the real entry point: the wiring in __main__ has no other test."""
     src = tmp_path / 'src'
