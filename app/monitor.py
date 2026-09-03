@@ -215,6 +215,26 @@ def _manifest_remove(encoded_rel_path):
     _locked_manifest_update(_update)
 
 
+def _manifest_move(old_rel_path, new_rel_path):
+    """Move an encode's manifest entry in one locked write.
+
+    Two separate updates would publish a manifest with neither entry in between,
+    and the cross-host reader that builds symlinks from it would drop the old link
+    without yet having the new one.
+    """
+    if not SYMLINK_MANIFEST_TARGET:
+        return
+    target = os.path.join(SYMLINK_MANIFEST_TARGET, new_rel_path)
+
+    def _update(manifest):
+        manifest.pop(old_rel_path, None)
+        manifest[new_rel_path] = target
+        logging.info(f'Manifest: moved {old_rel_path} -> {new_rel_path}')
+        return manifest
+
+    _locked_manifest_update(_update)
+
+
 def _manifest_reconcile():
     """Remove manifest entries whose encoded files no longer exist."""
     if not SYMLINK_MANIFEST_TARGET:
@@ -1106,8 +1126,7 @@ def move_encode(old_source, new_source):
         logging.warning(f'Could not move encode {old_encode} -> {new_encode} ({e}); encoding the new name instead')
         return False
     logging.info(f'Moved encode: {old_encode} -> {new_encode}')
-    _manifest_remove(os.path.relpath(old_encode, DEST_FOLDER))
-    _manifest_add(os.path.relpath(new_encode, DEST_FOLDER))
+    _manifest_move(os.path.relpath(old_encode, DEST_FOLDER), os.path.relpath(new_encode, DEST_FOLDER))
     delete_version_symlink(old_source)
     create_version_symlink(new_source, new_encode)
     return True

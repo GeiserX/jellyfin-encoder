@@ -155,3 +155,27 @@ def test_directory_moves_are_still_ignored(tree, submitted):
     src, _ = tree
     monitor.VideoHandler().on_moved(DirMovedEvent(str(src / 'a'), str(src / 'b')))
     assert submitted == []
+
+
+def test_the_manifest_entry_moves_in_one_locked_write(tree, submitted, monkeypatch):
+    src, dst = tree
+    monkeypatch.setattr(monitor, 'SYMLINK_MANIFEST_TARGET', '/media-720/Peliculas')
+    old = _file(src / 'Movie.mkv')
+    _file(dst / 'Movie - 720p.mp4', b'encoded')
+    monitor._manifest_add('Movie - 720p.mp4')
+    new = src / 'Movie (2024).mkv'
+    old.rename(new)
+    writes = []
+    real = monitor._locked_manifest_update
+
+    def counting(update_fn):
+        writes.append(update_fn)
+        return real(update_fn)
+    monkeypatch.setattr(monitor, '_locked_manifest_update', counting)
+
+    _move(old, new)
+
+    assert len(writes) == 1, 'old entry removed and new entry added in the same locked write'
+    manifest = monitor._read_manifest()
+    assert 'Movie - 720p.mp4' not in manifest
+    assert 'Movie (2024) - 720p.mp4' in manifest
