@@ -4,6 +4,7 @@ Every container start submits every source. On a caught-up library each ffprobe 
 network share is a remote read that ends in "Valid encoded file exists", so the destination
 must be checked before the source is touched.
 """
+import logging
 import os
 import sys
 
@@ -46,7 +47,8 @@ def test_an_encoded_source_is_skipped_without_touching_the_source(tree, monkeypa
     monkeypatch.setattr(monitor.subprocess, 'Popen', _never('ffmpeg'))
     processed, processing = {}, {}
 
-    monitor.encode_video(str(source), processed, processing)
+    with caplog.at_level(logging.INFO):
+        monitor.encode_video(str(source), processed, processing)
 
     assert 'Valid encoded file exists' in caplog.text
     assert processed == {str(dst / 'Show S01E01 1080p - 720p.mp4'): True}
@@ -60,7 +62,8 @@ def test_a_source_with_no_encode_is_still_probed_and_can_be_skipped_as_low_quali
     monkeypatch.setattr(monitor, 'is_already_low_quality', lambda path: True)
     monkeypatch.setattr(monitor.subprocess, 'Popen', _never('ffmpeg'))
 
-    monitor.encode_video(str(source), {}, {})
+    with caplog.at_level(logging.INFO):
+        monitor.encode_video(str(source), {}, {})
 
     assert 'Skipping low quality file' in caplog.text
     assert os.listdir(dst) == [], 'a skipped source leaves nothing behind in the destination'
