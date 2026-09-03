@@ -218,9 +218,9 @@ Two behaviours change for an existing install; both are described under
 
 - The source tree is scanned every 60 seconds instead of every second. Set
   `POLL_INTERVAL=1` to keep the old cadence.
-- A video renamed inside the source tree, or a renamed folder, is now encoded under its
-  new name within one poll. Before, it waited for the next container restart. The encode
-  that belonged to the old name is removed by the periodic cleanup, as it always was.
+- A video renamed inside the source tree, or a renamed folder, is now handled within one
+  poll. Before, it waited for the next container restart. Since 1.5.2 the finished encode
+  moves with it; 1.4.0 through 1.5.1 re-encoded it under the new name.
 
 ## Cross-Host Manifest Mode
 
@@ -326,10 +326,12 @@ use.
 
 The watcher matches files by inode, so a rename inside the source tree arrives as a move: a
 download finishing its rename from `.part` or `.!qB` into `.mkv`, a folder renamed by hand,
-or a file renamed by hand is encoded under its new name. A file copied in from outside is a
-plain create and is handled the same way. Renaming a folder re-encodes every video inside
-it, because encodes are located by their source path; the old encodes are orphans and the
-periodic cleanup removes them.
+or a file renamed by hand is handled within one poll. A finished encode follows its source:
+it is renamed in the destination, the manifest entry and the version symlink move with it,
+and nothing is encoded again, so renaming a whole folder costs a rename per file. A source
+is encoded under the new name only when its encode is missing, still being written, or
+cannot be renamed in place, for instance across filesystems. A file copied in from outside is
+a plain create and is handled the same way.
 
 ## Utilities
 

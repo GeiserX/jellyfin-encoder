@@ -215,6 +215,26 @@ def _manifest_remove(encoded_rel_path):
     _locked_manifest_update(_update)
 
 
+def _manifest_move(old_rel_path, new_rel_path):
+    """Move an encode's manifest entry in one locked write.
+
+    Two separate updates would publish a manifest with neither entry in between,
+    and the cross-host reader that builds symlinks from it would drop the old link
+    without yet having the new one.
+    """
+    if not SYMLINK_MANIFEST_TARGET:
+        return
+    target = os.path.join(SYMLINK_MANIFEST_TARGET, new_rel_path)
+
+    def _update(manifest):
+        manifest.pop(old_rel_path, None)
+        manifest[new_rel_path] = target
+        logging.info(f'Manifest: moved {old_rel_path} -> {new_rel_path}')
+        return manifest
+
+    _locked_manifest_update(_update)
+
+
 def _manifest_reconcile():
     """Remove manifest entries whose encoded files no longer exist."""
     if not SYMLINK_MANIFEST_TARGET:
@@ -431,16 +451,18 @@ class VideoHandler(FileSystemEventHandler):
         # until the container restarts and rescans.  A rename that starts and
         # finishes between two snapshots is reported as a plain create of the
         # final name instead, which on_created already handles.
-        #
-        # The encode that belonged to the old name is an orphan now and the
-        # periodic cleanup_destination() removes it, exactly as it does today
-        # when a source is renamed and the container later restarts.
         if event.is_directory:
             # A renamed folder also delivers one move per file inside it.
             return
-        if is_video_file(event.dest_path):
-            logging.info(f'Video file moved into place: {event.src_path} -> {event.dest_path}')
-            submit_encoding_task(event.dest_path)
+        if not is_video_file(event.dest_path):
+            return
+        # A finished encode follows its source: the content does not depend on
+        # the name, so a folder rename costs a rename per file, not a re-encode.
+        if is_video_file(event.src_path) and move_encode(event.src_path, event.dest_path):
+            logging.info(f'Video file moved: {event.src_path} -> {event.dest_path}; its encode moved with it')
+            return
+        logging.info(f'Video file moved into place: {event.src_path} -> {event.dest_path}')
+        submit_encoding_task(event.dest_path)
 
     def on_deleted(self, event):
         if event.is_directory:
@@ -1066,6 +1088,48 @@ def delete_version_symlink(source_path):
                 logging.info(f'Deleted version symlink: {symlink_path}')
     except Exception as e:
         logging.error(f'Failed to delete version symlink for {source_path}: {e}')
+
+
+def _output_location(source_path):
+    """(dest_dir, output_name) for a source, or (dest_dir, None) for a transcoded file."""
+    relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
+    dest_path = os.path.join(DEST_FOLDER, relative_path)
+    dest_dir = os.path.dirname(dest_path)
+    source_name, _ = os.path.splitext(os.path.basename(dest_path))
+    if SYMLINK_VERSION_SUFFIX:
+        return dest_dir, get_version_output_name(source_name)
+    return dest_dir, source_name
+
+
+def move_encode(old_source, new_source):
+    """Move the finished encode of a renamed source to its new name. True when one moved.
+
+    Returns False, and touches nothing, when the old name has no finished encode,
+    when an encode of the old name is still in flight (its .tmp is left for the
+    periodic cleanup, exactly as before), or when the move cannot be a plain
+    rename.  The caller then encodes the new name as it always did.
+    """
+    old_dir, old_name = _output_location(old_source)
+    new_dir, new_name = _output_location(new_source)
+    if old_name is None or new_name is None:
+        return False
+    if any(os.path.exists(p + '.tmp') for p in output_candidate_paths(old_dir, old_name)):
+        return False
+    old_encode = next(iter(existing_outputs(old_dir, old_name)), None)
+    if old_encode is None:
+        return False
+    new_encode = os.path.join(new_dir, new_name + os.path.splitext(old_encode)[1])
+    try:
+        os.makedirs(new_dir, exist_ok=True)
+        os.rename(old_encode, new_encode)
+    except OSError as e:
+        logging.warning(f'Could not move encode {old_encode} -> {new_encode} ({e}); encoding the new name instead')
+        return False
+    logging.info(f'Moved encode: {old_encode} -> {new_encode}')
+    _manifest_move(os.path.relpath(old_encode, DEST_FOLDER), os.path.relpath(new_encode, DEST_FOLDER))
+    delete_version_symlink(old_source)
+    create_version_symlink(new_source, new_encode)
+    return True
 
 
 def delete_encoded_video(source_path):
