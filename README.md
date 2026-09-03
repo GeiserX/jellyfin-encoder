@@ -187,6 +187,13 @@ The encoder periodically removes orphaned encodes (files in `DEST_FOLDER` with n
 
 **Limitations**: The persisted-count and ratio guards use a 50% threshold. A mount that exposes more than half its files will pass both guards, potentially allowing cleanup of files in invisible subtrees. After bulk intentional deletions, you may need to delete `DEST_FOLDER/.encoder_source_count` to reset the baseline — cleanup will refuse to run until the persisted count is reset or the source count recovers above 50%.
 
+### Restarts on a caught-up library
+
+Every container start submits every source again. A source whose encode already exists is
+skipped after one look at the destination, without probing the source, so a restart on a
+library of tens of thousands of files costs a stat per source rather than hours of metadata
+reads against the file server that holds the originals.
+
 ### Free-space floor
 
 `DEST_MIN_FREE_GB=1000` makes the encoder hold each new encode while the destination filesystem has less than 1 TB free, re-check every five minutes, and carry on by itself when space returns. Encodes already running finish, and the floor is checked again after the wait for a still-growing source, right before ffmpeg starts. If the free space cannot be read at all, the encode proceeds and ffmpeg reports whatever is really wrong, so the floor is a courtesy to the disk's other tenants, not a guarantee against ENOSPC. Use it when the destination shares a disk with something that must never see ENOSPC, such as an object store node or a database. The default `0` keeps the old behaviour: encode until the disk is full.

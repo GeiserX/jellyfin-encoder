@@ -769,30 +769,18 @@ def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
         logging.info(f'Already processing: {source_path}')
         return
-    
-    # Skip files that are already 720p or lower quality - no need to transcode
-    if is_already_low_quality(source_path):
-        logging.info(f'Skipping low quality file (already 720p or lower): {source_path}')
-        return
 
-    # Skip if a lower-quality sibling of the same media already exists in source
-    if SKIP_IF_LOW_QUALITY_EXISTS and has_low_quality_sibling(source_path):
-        return
-
-    # Log metadata if available (for debugging/verification)
-    metadata = get_metadata_info(source_path)
-    if metadata:
-        logging.info(f'Metadata for {os.path.basename(source_path)}: {metadata}')
-    
     processing_files[source_path] = True
 
     try:
-        if not wait_for_dest_headroom(source_path):
-            return
+        # Nothing below touches the source until a usable encode has been ruled out.  Every
+        # container start submits every source, and on a caught-up library of tens of
+        # thousands of files each ffprobe over a network share is a remote read that ends in
+        # "Valid encoded file exists"; checking the destination first makes that restart cost
+        # one stat per source instead of hours of metadata traffic against the file server.
         relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
         dest_path = os.path.join(DEST_FOLDER, relative_path)
         dest_dir = os.path.dirname(dest_path)
-        os.makedirs(dest_dir, exist_ok=True)
 
         base_name = os.path.basename(dest_path)
         source_name, _ = os.path.splitext(base_name)
@@ -842,6 +830,25 @@ def encode_video(source_path, processed_files, processing_files):
         for corrupt in encoded:
             logging.info(f'Removing unusable encode: {corrupt}')
             os.remove(corrupt)
+
+        # Only a source with no usable encode is worth probing.
+        # Skip files that are already 720p or lower quality - no need to transcode
+        if is_already_low_quality(source_path):
+            logging.info(f'Skipping low quality file (already 720p or lower): {source_path}')
+            return
+
+        # Skip if a lower-quality sibling of the same media already exists in source
+        if SKIP_IF_LOW_QUALITY_EXISTS and has_low_quality_sibling(source_path):
+            return
+
+        # Log metadata if available (for debugging/verification)
+        metadata = get_metadata_info(source_path)
+        if metadata:
+            logging.info(f'Metadata for {os.path.basename(source_path)}: {metadata}')
+
+        if not wait_for_dest_headroom(source_path):
+            return
+        os.makedirs(dest_dir, exist_ok=True)
 
         if not wait_for_file_completion(source_path):
             return
