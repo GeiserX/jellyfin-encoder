@@ -769,30 +769,18 @@ def encode_video(source_path, processed_files, processing_files):
     if processing_files.get(source_path):
         logging.info(f'Already processing: {source_path}')
         return
-    
-    # Skip files that are already 720p or lower quality - no need to transcode
-    if is_already_low_quality(source_path):
-        logging.info(f'Skipping low quality file (already 720p or lower): {source_path}')
-        return
 
-    # Skip if a lower-quality sibling of the same media already exists in source
-    if SKIP_IF_LOW_QUALITY_EXISTS and has_low_quality_sibling(source_path):
-        return
-
-    # Log metadata if available (for debugging/verification)
-    metadata = get_metadata_info(source_path)
-    if metadata:
-        logging.info(f'Metadata for {os.path.basename(source_path)}: {metadata}')
-    
     processing_files[source_path] = True
 
     try:
-        if not wait_for_dest_headroom(source_path):
-            return
+        # Nothing below touches the source until a usable encode has been ruled out.  Every
+        # container start submits every source, and on a caught-up library of tens of
+        # thousands of files each ffprobe over a network share is a remote read that ends in
+        # "Valid encoded file exists"; checking the destination first makes that restart cost
+        # one stat per source instead of hours of metadata traffic against the file server.
         relative_path = os.path.relpath(source_path, SOURCE_FOLDER)
         dest_path = os.path.join(DEST_FOLDER, relative_path)
         dest_dir = os.path.dirname(dest_path)
-        os.makedirs(dest_dir, exist_ok=True)
 
         base_name = os.path.basename(dest_path)
         source_name, _ = os.path.splitext(base_name)
@@ -815,6 +803,9 @@ def encode_video(source_path, processed_files, processing_files):
                 continue
             if is_file_growing(temp_path):
                 logging.info(f'Temp file {temp_path} is currently growing; skipping deletion.')
+                return
+            if not _dest_mount_healthy():
+                logging.warning(f'Destination mount looks unhealthy; leaving {temp_path} alone and not encoding {source_path}')
                 return
             logging.info(f'Deleting temp file: {temp_path}')
             os.remove(temp_path)
@@ -839,9 +830,32 @@ def encode_video(source_path, processed_files, processing_files):
             _manifest_add(os.path.relpath(valid_output, DEST_FOLDER))
             return
 
+        if encoded and not _dest_mount_healthy():
+            logging.warning(f'Destination mount looks unhealthy; leaving {len(encoded)} unverifiable encode(s) alone and not encoding {source_path}')
+            return
+
         for corrupt in encoded:
             logging.info(f'Removing unusable encode: {corrupt}')
             os.remove(corrupt)
+
+        # Only a source with no usable encode is worth probing.
+        # Skip files that are already 720p or lower quality - no need to transcode
+        if is_already_low_quality(source_path):
+            logging.info(f'Skipping low quality file (already 720p or lower): {source_path}')
+            return
+
+        # Skip if a lower-quality sibling of the same media already exists in source
+        if SKIP_IF_LOW_QUALITY_EXISTS and has_low_quality_sibling(source_path):
+            return
+
+        # Log metadata if available (for debugging/verification)
+        metadata = get_metadata_info(source_path)
+        if metadata:
+            logging.info(f'Metadata for {os.path.basename(source_path)}: {metadata}')
+
+        if not wait_for_dest_headroom(source_path):
+            return
+        os.makedirs(dest_dir, exist_ok=True)
 
         if not wait_for_file_completion(source_path):
             return
@@ -1091,6 +1105,21 @@ def scan_source_directory():
 
 def submit_encoding_task(file_path):
     executor.submit(encode_video, file_path, processed_files, processing_files)
+
+def _dest_mount_healthy():
+    """Quick check that the destination mount is responsive and populated.
+
+    Deletions in the destination must never run against a mount that has vanished or gone
+    read-only under us: a failed ffprobe on an output then looks like a corrupt encode, and
+    removing it would throw away good work.
+    """
+    try:
+        if not os.path.isdir(DEST_FOLDER):
+            return False
+        return len(os.listdir(DEST_FOLDER)) > 0
+    except (OSError, IOError):
+        return False
+
 
 def _source_mount_healthy():
     """Quick check that the source mount is responsive and populated."""
