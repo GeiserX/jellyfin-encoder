@@ -190,9 +190,10 @@ The encoder periodically removes orphaned encodes (files in `DEST_FOLDER` with n
 ### Restarts on a caught-up library
 
 Every container start submits every source again. A source whose encode already exists is
-skipped after one look at the destination, without probing the source, so a restart on a
-library of tens of thousands of files costs a stat per source rather than hours of metadata
-reads against the file server that holds the originals.
+skipped after a look at the destination and a validation of the existing output, without
+probing the source, so a restart on a library of tens of thousands of files costs local
+destination checks per source rather than hours of metadata reads against the file server
+that holds the originals.
 
 ### Free-space floor
 

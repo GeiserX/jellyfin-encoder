@@ -67,3 +67,36 @@ def test_a_source_with_no_encode_is_still_probed_and_can_be_skipped_as_low_quali
 
     assert 'Skipping low quality file' in caplog.text
     assert os.listdir(dst) == [], 'a skipped source leaves nothing behind in the destination'
+
+
+def test_an_unverifiable_encode_is_left_alone_when_the_destination_looks_unhealthy(tree, monkeypatch, caplog):
+    src, dst = tree
+    source = src / 'Show S01E03 1080p.mkv'
+    source.write_bytes(b'x' * 16)
+    output = dst / 'Show S01E03 1080p - 720p.mp4'
+    output.write_bytes(b'y' * 16)
+    monkeypatch.setattr(monitor, 'verify_encoded_file', lambda path: False)  # what an I/O failure looks like
+    monkeypatch.setattr(monitor, '_dest_mount_healthy', lambda: False)
+    monkeypatch.setattr(monitor.subprocess, 'Popen', _never('ffmpeg'))
+
+    with caplog.at_level(logging.INFO):
+        monitor.encode_video(str(source), {}, {})
+
+    assert output.exists(), 'a deletion must never run against an unhealthy destination'
+    assert 'unhealthy' in caplog.text
+
+
+def test_an_unverifiable_encode_is_removed_when_the_destination_is_healthy(tree, monkeypatch, caplog):
+    src, dst = tree
+    source = src / 'Show S01E04 1080p.mkv'
+    source.write_bytes(b'x' * 16)
+    output = dst / 'Show S01E04 1080p - 720p.mp4'
+    output.write_bytes(b'y' * 16)
+    monkeypatch.setattr(monitor, 'verify_encoded_file', lambda path: False)
+    monkeypatch.setattr(monitor, 'is_already_low_quality', lambda path: True)  # stop before any encode
+
+    with caplog.at_level(logging.INFO):
+        monitor.encode_video(str(source), {}, {})
+
+    assert not output.exists()
+    assert 'Removing unusable encode' in caplog.text

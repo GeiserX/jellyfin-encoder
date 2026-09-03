@@ -804,6 +804,9 @@ def encode_video(source_path, processed_files, processing_files):
             if is_file_growing(temp_path):
                 logging.info(f'Temp file {temp_path} is currently growing; skipping deletion.')
                 return
+            if not _dest_mount_healthy():
+                logging.warning(f'Destination mount looks unhealthy; leaving {temp_path} alone and not encoding {source_path}')
+                return
             logging.info(f'Deleting temp file: {temp_path}')
             os.remove(temp_path)
 
@@ -825,6 +828,10 @@ def encode_video(source_path, processed_files, processing_files):
             # Ensure version symlink exists even for previously encoded files
             create_version_symlink(source_path, valid_output)
             _manifest_add(os.path.relpath(valid_output, DEST_FOLDER))
+            return
+
+        if encoded and not _dest_mount_healthy():
+            logging.warning(f'Destination mount looks unhealthy; leaving {len(encoded)} unverifiable encode(s) alone and not encoding {source_path}')
             return
 
         for corrupt in encoded:
@@ -1098,6 +1105,21 @@ def scan_source_directory():
 
 def submit_encoding_task(file_path):
     executor.submit(encode_video, file_path, processed_files, processing_files)
+
+def _dest_mount_healthy():
+    """Quick check that the destination mount is responsive and populated.
+
+    Deletions in the destination must never run against a mount that has vanished or gone
+    read-only under us: a failed ffprobe on an output then looks like a corrupt encode, and
+    removing it would throw away good work.
+    """
+    try:
+        if not os.path.isdir(DEST_FOLDER):
+            return False
+        return len(os.listdir(DEST_FOLDER)) > 0
+    except (OSError, IOError):
+        return False
+
 
 def _source_mount_healthy():
     """Quick check that the source mount is responsive and populated."""
