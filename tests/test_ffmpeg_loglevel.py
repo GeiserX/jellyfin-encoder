@@ -8,11 +8,13 @@ that actually matters: the level reaching the command line.
 """
 import logging
 import os
+import subprocess
 import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
+APP_DIR = os.path.join(os.path.dirname(__file__), '..', 'app')
+sys.path.insert(0, APP_DIR)
 
 import monitor  # noqa: E402
 
@@ -56,6 +58,40 @@ def test_ffmpegs_numeric_and_flag_syntax_is_deliberately_not_passed_through(unsu
     with caplog.at_level(logging.WARNING):
         assert monitor._parse_ffmpeg_loglevel(unsupported) == 'warning'
     assert any('Accepted:' in record.message for record in caplog.records)
+
+
+def _loglevel_from_environment(value):
+    """Import the module in a clean process and report the level it resolved.
+
+    The constant is read from the environment once, at import.  Every test that patches
+    the module afterwards therefore proves nothing about the variable's name, the default
+    or the call that ties them together: a rename to FFMPEG_LOG_LEVEL would leave this
+    whole file green while every container silently ran at the default.  Only a fresh
+    import catches that, and only in its own process.
+    """
+    env = dict(os.environ)
+    env.pop('FFMPEG_LOGLEVEL', None)
+    if value is not None:
+        env['FFMPEG_LOGLEVEL'] = value
+    result = subprocess.run(
+        [sys.executable, '-c', 'import monitor; print("LEVEL=" + monitor.FFMPEG_LOGLEVEL)'],
+        cwd=APP_DIR, env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    resolved = [line[len('LEVEL='):] for line in result.stdout.splitlines()
+                if line.startswith('LEVEL=')]
+    assert resolved, f'the import printed nothing: {result.stdout!r} {result.stderr!r}'
+    return resolved[-1]
+
+
+@pytest.mark.parametrize('value,expected', [
+    (None, 'warning'),        # nothing set: what every container gets
+    ('verbose', 'verbose'),   # the escape hatch, end to end
+    (' TRACE ', 'trace'),
+    ('lots', 'warning'),      # a typo starts the container anyway
+    ('', 'warning'),
+])
+def test_the_environment_variable_reaches_the_constant(value, expected):
+    assert _loglevel_from_environment(value) == expected
 
 
 class _Proc:
