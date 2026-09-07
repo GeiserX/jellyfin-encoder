@@ -442,10 +442,16 @@ def _parse_ffmpeg_loglevel(value, default='warning'):
     log capped at a few megabytes then holds only hours, and an incident older than the cap
     cannot be diagnosed at all - which is exactly what happened to three abandoned encodes on
     2026-09-07.  Raise it per container when a specific file needs the full FFmpeg dump.
+
+    Only the nine level names are accepted.  FFmpeg also takes numeric levels and the flag
+    syntax `repeat+level+verbose`, and neither is passed through: this knob exists to turn
+    the log up for one container, and a value that has to be parsed to be trusted is a value
+    that can fail every encode when it is wrong.
     """
     parsed = str(value).strip().lower()
     if parsed not in FFMPEG_LOG_LEVELS:
-        logging.warning(f'Invalid FFMPEG_LOGLEVEL "{value}" - using {default}.')
+        logging.warning(f'Invalid FFMPEG_LOGLEVEL "{value}" - using {default}. '
+                        f'Accepted: {", ".join(FFMPEG_LOG_LEVELS)}.')
         return default
     return parsed
 

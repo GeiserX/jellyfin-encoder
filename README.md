@@ -214,8 +214,10 @@ at the default few megabytes then held a few hours, and anything older was gone 
 anyone went looking for it.
 
 Set `FFMPEG_LOGLEVEL=verbose` on one container when a single file needs the full FFmpeg dump.
-Every level FFmpeg accepts works. Anything else falls back to `warning` and logs a line
-saying so, because a level FFmpeg does not know makes it exit before it opens the input,
+The nine level names work: `quiet`, `panic`, `fatal`, `error`, `warning`, `info`, `verbose`,
+`debug`, `trace`. FFmpeg's numeric levels and its flag syntax, `repeat+level+verbose`, are
+not passed through. Anything outside the nine falls back to `warning` and logs a line naming
+what it takes, because a level FFmpeg does not know makes it exit before it opens the input,
 which would fail every encode.
 
 ### Upgrading from < 1.1.0

@@ -39,13 +39,23 @@ def test_case_and_padding_are_forgiven(value, expected):
 
 
 @pytest.mark.parametrize('bad', ['', 'lots', 'warn', 'v', None, 0, 'info,verbose',
-                                 'warning; rm -rf /', 'repeat+level+verbose'])
+                                 'warning; rm -rf /'])
 def test_an_unknown_level_never_reaches_ffmpeg(bad, caplog):
     """FFmpeg exits before opening the input on a level it does not know, so a typo
-    would fail every encode.  It has to fall back, and say so."""
+    would fail every encode.  It has to fall back, and say what it takes."""
     with caplog.at_level(logging.WARNING):
         assert monitor._parse_ffmpeg_loglevel(bad) == 'warning'
     assert any('FFMPEG_LOGLEVEL' in record.message for record in caplog.records)
+    assert any('Accepted:' in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize('unsupported', ['repeat+level+verbose', '+repeat', '40', '-8'])
+def test_ffmpegs_numeric_and_flag_syntax_is_deliberately_not_passed_through(unsupported, caplog):
+    """FFmpeg itself takes these.  This knob does not, on purpose: it turns the log up
+    for one container, and every value it forwards is one that can fail every encode."""
+    with caplog.at_level(logging.WARNING):
+        assert monitor._parse_ffmpeg_loglevel(unsupported) == 'warning'
+    assert any('Accepted:' in record.message for record in caplog.records)
 
 
 class _Proc:
