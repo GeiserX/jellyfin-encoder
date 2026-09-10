@@ -28,6 +28,7 @@ def test_the_shipped_default_is_warning():
 
 @pytest.mark.parametrize('level', monitor.FFMPEG_LOG_LEVELS)
 def test_every_level_ffmpeg_knows_is_accepted(level):
+    """Every name FFmpeg documents survives the parser unchanged."""
     assert monitor._parse_ffmpeg_loglevel(level) == level
 
 
@@ -37,6 +38,7 @@ def test_every_level_ffmpeg_knows_is_accepted(level):
     ('Quiet', 'quiet'),
 ])
 def test_case_and_padding_are_forgiven(value, expected):
+    """A level pasted from the docs with stray case or spaces still works."""
     assert monitor._parse_ffmpeg_loglevel(value) == expected
 
 
@@ -91,6 +93,7 @@ def _loglevel_from_environment(value):
     ('', 'warning'),
 ])
 def test_the_environment_variable_reaches_the_constant(value, expected):
+    """The whole chain: environment, through the parser, into the module constant."""
     assert _loglevel_from_environment(value) == expected
 
 
@@ -98,6 +101,7 @@ class _Proc:
     """Popen stand-in: records nothing, writes the .tmp, returns a code."""
 
     def __init__(self, cmd, return_code):
+        """Write the .tmp FFmpeg would have written, so the caller's checks see it."""
         self.stdout = iter([])
         self._code = return_code
         tmp_path = cmd[-1]
@@ -107,6 +111,7 @@ class _Proc:
                 f.write(b'fake encoded data')
 
     def wait(self):
+        """Stand in for the real process exit, which the encoder branches on."""
         return self._code
 
 
@@ -131,9 +136,11 @@ def encode(tmp_path, monkeypatch):
     monkeypatch.setattr(monitor, 'verify_encoded_file', lambda *a, **k: True)
 
     def _run(return_code=0):
+        """Drive one encode and return every command FFmpeg would have been given."""
         commands = []
 
         def _popen(cmd, **kwargs):
+            """Capture the command instead of running it."""
             commands.append(list(cmd))
             return _Proc(list(cmd), return_code)
 
@@ -147,10 +154,12 @@ def encode(tmp_path, monkeypatch):
 
 
 def _loglevel_of(cmd):
+    """Read back the value FFmpeg was actually given for -loglevel."""
     return cmd[cmd.index('-loglevel') + 1]
 
 
 def test_the_encode_command_carries_the_configured_level(encode):
+    """The configured level has to reach the command line, not just the constant."""
     commands = encode()
     assert commands, 'no ffmpeg command was built'
     assert _loglevel_of(commands[0]) == monitor.FFMPEG_LOGLEVEL
