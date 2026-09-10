@@ -426,13 +426,46 @@ DEST_MIN_FREE_GB = _parse_dest_min_free_gb(os.getenv('DEST_MIN_FREE_GB', '0'))
 DEST_MIN_FREE_BYTES = int(DEST_MIN_FREE_GB * 1000 ** 3)
 DEST_MIN_FREE_POLL_SECONDS = 300
 
+
+# Everything FFmpeg accepts for -loglevel.  A level it does not know makes it exit before it
+# opens the input, so an unknown value must never reach the command line.
+FFMPEG_LOG_LEVELS = ('quiet', 'panic', 'fatal', 'error', 'warning', 'info', 'verbose', 'debug', 'trace')
+
+
+def _parse_ffmpeg_loglevel(value, default='warning'):
+    """How much FFmpeg writes to the container log during an encode.
+
+    `warning` prints nothing at all for a healthy encode and still prints everything FFmpeg
+    complains about.  `verbose`, the old value, writes a progress line twice a second: Python
+    reads FFmpeg's output in text mode, where the carriage return FFmpeg uses to redraw its
+    stats counts as a newline, so every redraw becomes its own log record.  A Docker json-file
+    log capped at a few megabytes then holds only hours, and an incident older than the cap
+    cannot be diagnosed at all - which is exactly what happened to three abandoned encodes on
+    2026-09-07.  Raise it per container when a specific file needs the full FFmpeg dump.
+
+    Only the nine level names are accepted.  FFmpeg also takes numeric levels and the flag
+    syntax `repeat+level+verbose`, and neither is passed through: this knob exists to turn
+    the log up for one container, and a value that has to be parsed to be trusted is a value
+    that can fail every encode when it is wrong.
+    """
+    parsed = str(value).strip().lower()
+    if parsed not in FFMPEG_LOG_LEVELS:
+        logging.warning(f'Invalid FFMPEG_LOGLEVEL "{value}" - using {default}. '
+                        f'Accepted: {", ".join(FFMPEG_LOG_LEVELS)}.')
+        return default
+    return parsed
+
+
+FFMPEG_LOGLEVEL = _parse_ffmpeg_loglevel(os.getenv('FFMPEG_LOGLEVEL', 'warning'))
+
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
              f'CODEC={resolve_codec()}, CONTAINER={resolve_container()}, QUALITY={ENCODING_QUALITY}, '
              f'HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
              f'AUDIO={AUDIO_CODEC}/{AUDIO_BITRATE}/{AUDIO_CHANNELS}ch, '
              f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}, '
              f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}, '
-             f'POLL_INTERVAL={POLL_INTERVAL:g}s')
+             f'POLL_INTERVAL={POLL_INTERVAL:g}s, '
+             f'FFMPEG_LOGLEVEL={FFMPEG_LOGLEVEL}')
 
 
 class VideoHandler(FileSystemEventHandler):
@@ -958,7 +991,7 @@ def encode_video(source_path, processed_files, processing_files):
 
         # Build the FFmpeg command
         command = [
-            'ffmpeg', '-loglevel', 'verbose', '-y',
+            'ffmpeg', '-loglevel', FFMPEG_LOGLEVEL, '-y',
             '-analyzeduration', '100M', '-probesize', '100M',
             '-i', source_path,
             '-map', '0:v:0',
@@ -1005,7 +1038,7 @@ def encode_video(source_path, processed_files, processing_files):
 
         if returncode != 0 and subtitle_args:
             # A subtitle stream must never cost us the encode.
-            logging.warning(f'FFmpeg failed with subtitles mapped, retrying without them: {source_path}')
+            logging.warning(f'FFmpeg failed with subtitles mapped (exit {returncode}), retrying without them: {source_path}')
             if os.path.exists(dest_file_temp):
                 os.remove(dest_file_temp)
             returncode = _run_ffmpeg(command + ['-sn'] + output_args)
@@ -1023,7 +1056,7 @@ def encode_video(source_path, processed_files, processing_files):
                 logging.error(f'File verification failed, removing temp file: {dest_file_temp}')
                 os.remove(dest_file_temp)
         else:
-            logging.error(f'FFmpeg encoding failed for file: {source_path}')
+            logging.error(f'FFmpeg encoding failed (exit {returncode}) for file: {source_path}')
             if os.path.exists(dest_file_temp):
                 os.remove(dest_file_temp)
     finally:
