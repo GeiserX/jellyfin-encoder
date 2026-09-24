@@ -8,10 +8,13 @@ if platform.system() != 'Windows':
 else:
     import msvcrt
 
+import datetime
 import heapq
 import shutil
 import subprocess
 import threading
+import urllib.parse
+import urllib.request
 import concurrent.futures
 from multiprocessing import Manager, freeze_support
 from watchdog.observers.polling import PollingObserver
@@ -463,6 +466,40 @@ def _parse_ffmpeg_loglevel(value, default='warning'):
 
 FFMPEG_LOGLEVEL = _parse_ffmpeg_loglevel(os.getenv('FFMPEG_LOGLEVEL', 'warning'))
 
+
+def _parse_positive(name, value, default, cast=float):
+    """A positive finite number from the environment, or the default with a warning."""
+    try:
+        parsed = cast(value)
+    except (TypeError, ValueError):
+        logging.warning(f'Invalid {name} "{value}" - using {default}.')
+        return default
+    # NaN fails every comparison, so it lands here too.
+    if not 0 < parsed < float('inf'):
+        logging.warning(f'{name} must be above zero, got "{value}" - using {default}.')
+        return default
+    return parsed
+
+
+def _parse_names(value):
+    """A comma-separated list of Jellyfin usernames, compared without case."""
+    return {n.strip().casefold() for n in (value or '').split(',') if n.strip()}
+
+
+# Jellyfin as a second priority source (see "Prioritise what people watch" in the README).
+# Off unless JELLYFIN_URL is set.
+JELLYFIN_URL = os.getenv('JELLYFIN_URL', '').strip().rstrip('/')
+JELLYFIN_API_KEY = os.getenv('JELLYFIN_API_KEY', '').strip()
+# Where Jellyfin sees SOURCE_FOLDER; the same path when both run on one host.
+JELLYFIN_PATH_PREFIX = os.getenv('JELLYFIN_PATH_PREFIX', '').strip() or SOURCE_FOLDER
+PRIORITY_USERS = _parse_names(os.getenv('PRIORITY_USERS'))
+PRIORITY_EXCLUDE_USERS = _parse_names(os.getenv('PRIORITY_EXCLUDE_USERS'))
+PRIORITY_REFRESH_MINUTES = _parse_positive('PRIORITY_REFRESH_MINUTES', os.getenv('PRIORITY_REFRESH_MINUTES', '20'), 20.0)
+PRIORITY_NEXT_EPISODES = _parse_positive('PRIORITY_NEXT_EPISODES', os.getenv('PRIORITY_NEXT_EPISODES', '3'), 3, int)
+PRIORITY_WINDOW_DAYS = _parse_positive('PRIORITY_WINDOW_DAYS', os.getenv('PRIORITY_WINDOW_DAYS', '60'), 60.0)
+JELLYFIN_TIMEOUT = 30          # seconds per request
+JELLYFIN_FIRST_REFRESH_WAIT = 120  # seconds the dispatcher waits for the first list at startup
+
 logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER}, '
              f'CODEC={resolve_codec()}, CONTAINER={resolve_container()}, QUALITY={ENCODING_QUALITY}, '
              f'HW={HW_ENCODING_TYPE if ENABLE_HW_ACCEL else "disabled"}, '
@@ -471,7 +508,8 @@ logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER},
              f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}, '
              f'POLL_INTERVAL={POLL_INTERVAL:g}s, '
              f'FFMPEG_LOGLEVEL={FFMPEG_LOGLEVEL}, '
-             f'PRIORITY_FILE={PRIORITY_FILE}')
+             f'PRIORITY_FILE={PRIORITY_FILE}, '
+             f'JELLYFIN_PRIORITY={JELLYFIN_URL or "disabled"}')
 
 
 class VideoHandler(FileSystemEventHandler):
@@ -1303,6 +1341,9 @@ class EncodeQueue:
         self._arrivals = 0
         self._index = {}
         self._signature = object()  # matches no real signature, so the first pick reads the file
+        self._file_entries = []
+        self._watch_entries = []    # from Jellyfin, ranked after the file's entries
+        self._watch_changed = False
 
     def add(self, path):
         """Queue path unless it is already waiting or running.  True when it was queued."""
@@ -1345,6 +1386,14 @@ class EncodeQueue:
                 self._cond.wait_for(lambda: self._pending and len(self._running) < self._max_workers)
             self.dispatch()
 
+    def set_watch_entries(self, entries):
+        """Replace the Jellyfin entries; the next pick re-orders what waits if they changed."""
+        with self._cond:
+            entries = list(entries)
+            if entries != self._watch_entries:
+                self._watch_entries = entries
+                self._watch_changed = True
+
     def _finished(self, path, future):
         with self._cond:
             self._running.discard(path)
@@ -1364,10 +1413,14 @@ class EncodeQueue:
 
     def _reload_priority(self):
         signature = _file_signature(self._priority_file)
-        if signature == self._signature:
+        if signature == self._signature and not self._watch_changed:
             return
-        self._signature = signature
-        entries = load_priority_entries(self._priority_file) if signature else []
+        if signature != self._signature:
+            self._signature = signature
+            self._file_entries = load_priority_entries(self._priority_file) if signature else []
+        self._watch_changed = False
+        # The file's entries come first; priority_index keeps the first rank of a repeated path.
+        entries = self._file_entries + self._watch_entries
         self._index = priority_index(entries)
         self._heap = [self._heap_item(p, n) for p, n in self._pending.items()]
         heapq.heapify(self._heap)
@@ -1378,12 +1431,223 @@ class EncodeQueue:
         first = ''
         if matched:
             first = f'; first: {os.path.relpath(self._heap[0][2], SOURCE_FOLDER)}'
-        logging.info(f'Priority list {self._priority_file}: {len(entries)} entries, '
+        watched = f' + {len(self._watch_entries)} from Jellyfin' if self._watch_entries else ''
+        logging.info(f'Priority list {self._priority_file}: {len(self._file_entries)} entries{watched}, '
                      f'{matched} of {len(self._pending)} pending files match{first}')
 
 
 def submit_encoding_task(file_path):
     encode_queue.add(file_path)
+
+
+# ── Jellyfin as a priority source ───────────────────────────────────────────
+
+def _jellyfin_parts(path):
+    """Components of a path as Jellyfin reports it, which may use either separator."""
+    return tuple(p for p in path.replace('\\', '/').split('/') if p not in ('', '.'))
+
+
+def jellyfin_rel_path(item_path, prefix):
+    """The SOURCE_FOLDER-relative path of a Jellyfin item path, or None outside prefix.
+
+    Compared on whole components, so a trailing slash on either side does not matter
+    and `/media/Series` does not claim `/media/Series Extra/x.mkv`.
+    """
+    parts, base = _jellyfin_parts(item_path or ''), _jellyfin_parts(prefix)
+    if len(parts) <= len(base) or parts[:len(base)] != base:
+        return None
+    return '/'.join(parts[len(base):])
+
+
+def _played_key(date):
+    """Jellyfin's UTC timestamp cut to the second, so ISO strings of any precision compare."""
+    return (date or '')[:19]
+
+
+def order_watch(records):
+    """Jellyfin paths to encode first, as (path, is_folder), highest priority first.
+
+    A record is one series or one item a user watches: key (series or item id), name,
+    played (last played, ISO), files, and for a series seasons [(index, path)] and
+    next_season.  Records sharing a key, from several users, merge.  Groups rank by the latest play across
+    users, then by name.  Every group's files come first, then every series' season
+    folders in the same group order: the next-up season onward, then earlier ones.
+    """
+    merged = {}
+    for r in records:
+        g = merged.setdefault(r['key'], {'name': r.get('name') or '', 'played': '', 'files': [],
+                                         'series': False, 'seasons': [], 'next_seasons': []})
+        g['played'] = max(g['played'], _played_key(r.get('played')))
+        g['files'] += [f for f in r.get('files', ()) if f]
+        g['series'] = g['series'] or bool(r.get('series'))
+        g['seasons'] += [s for s in r.get('seasons', ()) if s[1]]
+        if r.get('next_season') is not None:
+            g['next_seasons'].append(r['next_season'])
+    groups = sorted(merged.values(), key=lambda g: g['name'].casefold())
+    groups.sort(key=lambda g: g['played'], reverse=True)   # stable: names order the ties
+
+    files, folders = [], []
+    for g in groups:
+        files += [(f, False) for f in sorted(set(g['files']), key=_jellyfin_parts)]
+        if not g['series']:
+            continue
+        # When users are on different seasons, the earliest one they are on leads.
+        nxt = min(g['next_seasons'], default=0)
+        seasons = sorted(set(g['seasons']), key=lambda s: (s[0] is None, s[0] or 0))
+        ordered = ([p for i, p in seasons if i is None or i >= nxt]
+                   + [p for i, p in seasons if i is not None and i < nxt])
+        # A show without season folders keeps its episodes in its own folder.
+        ordered += ['/'.join(_jellyfin_parts(f)[:-1]) for f in g['files']]
+        folders += [(p, True) for p in ordered]
+    return files + folders
+
+
+def jellyfin_entries(records, prefix):
+    """Priority entries relative to SOURCE_FOLDER; paths outside prefix are dropped, repeats too."""
+    entries = []
+    for path, is_folder in order_watch(records):
+        rel = jellyfin_rel_path(path, prefix)
+        if rel is None:
+            continue
+        entry = rel + '/' if is_folder else rel
+        if entry not in entries:
+            entries.append(entry)
+    return entries
+
+
+class JellyfinPriority:
+    """Asks Jellyfin what people are watching and turns it into priority entries."""
+
+    def __init__(self, url, api_key, path_prefix, users=(), exclude_users=(),
+                 next_episodes=3, window_days=60.0):
+        self.url = url.rstrip('/')
+        self._api_key = api_key
+        self.path_prefix = path_prefix
+        self.users = set(users)
+        self.exclude_users = set(exclude_users)
+        self.next_episodes = next_episodes
+        self.window_days = window_days
+
+    def _get(self, path, params=None):
+        url = self.url + path
+        if params:
+            url += '?' + urllib.parse.urlencode(params)
+        # Jellyfin 10.11 and later accept an API key only in this header.
+        request = urllib.request.Request(url, headers={
+            'Authorization': f'MediaBrowser Token="{self._api_key}"', 'Accept': 'application/json'})
+        with urllib.request.urlopen(request, timeout=JELLYFIN_TIMEOUT) as response:
+            return json.load(response)
+
+    def _redact(self, text):
+        return text.replace(self._api_key, '<redacted>') if self._api_key else text
+
+    def _users(self):
+        users = []
+        for user in self._get('/Users'):
+            name = (user.get('Name') or '').casefold()
+            if (user.get('Policy') or {}).get('IsDisabled'):
+                continue
+            if self.users and name not in self.users:
+                continue
+            if name in self.exclude_users:
+                continue
+            users.append(user)
+        return users
+
+    def watch_records(self, now=None):
+        """Records for order_watch() and the number of users asked."""
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        cutoff = (now - datetime.timedelta(days=self.window_days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        users = self._users()
+        seasons_cache = {}
+        records = []
+        for user in users:
+            uid = user['Id']
+            # The series' own user data has no play date, so the latest played episode stands in.
+            played = {}
+            for item in self._get('/Items', {
+                    'userId': uid, 'Recursive': 'true', 'IncludeItemTypes': 'Episode', 'Filters': 'IsPlayed',
+                    'SortBy': 'DatePlayed', 'SortOrder': 'Descending', 'Limit': 200}).get('Items', []):
+                date = _played_key((item.get('UserData') or {}).get('LastPlayedDate'))
+                sid = item.get('SeriesId')
+                if sid and date > played.get(sid, ''):
+                    played[sid] = date
+
+            for ep in self._get('/Shows/NextUp', {
+                    'userId': uid, 'limit': 100, 'fields': 'Path', 'enableResumable': 'true',
+                    'nextUpDateCutoff': cutoff, 'enableTotalRecordCount': 'false'}).get('Items', []):
+                sid = ep.get('SeriesId')
+                files = [ep.get('Path')]
+                if self.next_episodes > 1:
+                    files += [e.get('Path') for e in self._get(f'/Shows/{sid}/Episodes', {
+                        'userId': uid, 'startItemId': ep['Id'], 'limit': self.next_episodes,
+                        'fields': 'Path'}).get('Items', [])[:self.next_episodes]]
+                if sid not in seasons_cache:
+                    seasons_cache[sid] = [(s.get('IndexNumber'), s.get('Path')) for s in self._get(
+                        f'/Shows/{sid}/Seasons', {'userId': uid, 'fields': 'Path'}).get('Items', [])]
+                records.append({'key': sid, 'name': ep.get('SeriesName'), 'played': played.get(sid),
+                                'files': files, 'series': True, 'seasons': seasons_cache[sid],
+                                'next_season': ep.get('ParentIndexNumber')})
+
+            for item in self._get('/Items', {
+                    'userId': uid, 'Filters': 'IsResumable', 'Recursive': 'true', 'IncludeItemTypes': 'Movie,Episode',
+                    'Fields': 'Path', 'SortBy': 'DatePlayed', 'SortOrder': 'Descending',
+                    'Limit': 50}).get('Items', []):
+                date = _played_key((item.get('UserData') or {}).get('LastPlayedDate'))
+                if date and date < cutoff[:19]:
+                    continue
+                series = item.get('Type') == 'Episode' and item.get('SeriesId')
+                records.append({'key': series or item.get('Id'),
+                                'name': item.get('SeriesName') if series else item.get('Name'),
+                                'played': date, 'files': [item.get('Path')], 'series': bool(series),
+                                'next_season': item.get('ParentIndexNumber') if series else None})
+        return records, len(users)
+
+    def refresh(self):
+        """Priority entries from what people watch now; raises when Jellyfin cannot be asked."""
+        started = time.monotonic()
+        records, user_count = self.watch_records()
+        entries = jellyfin_entries(records, self.path_prefix)
+        first = f'; first: {entries[0]}' if entries else ''
+        logging.info(f'Jellyfin priority: {user_count} users, {len(entries)} entries '
+                     f'in {time.monotonic() - started:.1f}s{first}')
+        return entries
+
+    def refresh_into(self, queue):
+        """One refresh.  A failure keeps the queue's previous list and logs one line."""
+        try:
+            entries = self.refresh()
+        except Exception as e:
+            logging.warning(f'Jellyfin priority refresh failed, keeping the previous list: '
+                            f'{self._redact(f"{type(e).__name__}: {e}")}')
+            return False
+        queue.set_watch_entries(entries)
+        return True
+
+    def start(self, queue, interval_seconds):
+        """Refresh on a daemon thread every interval.  The event is set after the first attempt."""
+        first_done = threading.Event()
+
+        def run():
+            while True:
+                self.refresh_into(queue)
+                first_done.set()
+                time.sleep(interval_seconds)
+
+        threading.Thread(target=run, name='jellyfin-priority', daemon=True).start()
+        return first_done
+
+
+def start_jellyfin_priority(queue):
+    """Start the Jellyfin refresher when JELLYFIN_URL is set; returns its first-refresh event or None."""
+    if not JELLYFIN_URL:
+        return None
+    if not JELLYFIN_API_KEY:
+        logging.warning('JELLYFIN_URL is set without JELLYFIN_API_KEY; every refresh will be refused')
+    source = JellyfinPriority(JELLYFIN_URL, JELLYFIN_API_KEY, JELLYFIN_PATH_PREFIX,
+                              PRIORITY_USERS, PRIORITY_EXCLUDE_USERS,
+                              PRIORITY_NEXT_EPISODES, PRIORITY_WINDOW_DAYS)
+    return source.start(queue, PRIORITY_REFRESH_MINUTES * 60)
 
 def _dest_mount_healthy():
     """Quick check that the destination mount is responsive and populated.
@@ -1656,10 +1920,14 @@ if __name__ == "__main__":
     cleanup_destination()
     cleanup_orphaned_symlinks()
     observer = start_monitoring()
+    jellyfin_ready = start_jellyfin_priority(encode_queue)
     for file_path in scan_source_directory():
         submit_encoding_task(file_path)
     # Started only once the whole library is queued: an encode can hold a worker for hours,
-    # so the first picks must see every file, not just the first few the walk found.
+    # so the first picks must see every file, not just the first few the walk found.  For
+    # the same reason they wait, for a bounded time, for Jellyfin's first answer.
+    if jellyfin_ready is not None:
+        jellyfin_ready.wait(timeout=JELLYFIN_FIRST_REFRESH_WAIT)
     encode_queue.start()
 
     last_cleanup = time.time()
