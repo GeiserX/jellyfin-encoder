@@ -238,20 +238,51 @@ def test_a_new_file_from_the_watcher_jumps_ahead_of_lower_pending_files(src, pri
         'Show B/E01.mkv', 'Show A/E05.mkv', 'Show B/E02.mkv', 'Other/x.mkv']
 
 
-def test_a_path_already_waiting_or_running_is_not_queued_twice(src, priority_file):
+def test_a_path_already_waiting_is_not_queued_twice(src, priority_file):
     queue, executor = _queue(src, priority_file)
     running, waiting = _abs(src, 'a.mkv'), _abs(src, 'b.mkv')
     assert queue.add(running)
     queue.dispatch()
     assert queue.add(waiting)
     assert not queue.add(waiting)
-    assert not queue.add(running)
     executor.finish(running)
     queue.dispatch()
     executor.finish(waiting)
     assert executor.started() == [running, waiting]
+    assert queue.dispatch() == 0
     # Once finished, a file can be queued again, as a later rename or re-create needs.
     assert queue.add(running)
+
+
+def test_a_path_asked_for_while_it_runs_runs_again_once_after(src, priority_file):
+    """A source replaced at the same path mid-encode must not stay unencoded until a restart."""
+    queue, executor = _queue(src, priority_file)
+    path = _abs(src, 'Show A/E01.mkv')
+    queue.add(path)
+    queue.dispatch()
+    # The replacement arrives as delete + create while the old file encodes; twice is still once.
+    assert not queue.add(path)
+    assert not queue.add(path)
+    assert queue.dispatch() == 0            # not alongside its own running encode
+    executor.finish(path)
+    assert queue.dispatch() == 1
+    assert not queue.add(path)              # asked for again during the second run too
+    executor.finish(path)
+    assert queue.dispatch() == 1
+    executor.finish(path)
+    assert queue.dispatch() == 0
+    assert executor.started() == [path, path, path]
+
+
+def test_a_rerun_waits_its_turn_behind_files_that_arrived_first(src, priority_file):
+    queue, executor = _queue(src, priority_file)
+    first, other = _abs(src, 'a.mkv'), _abs(src, 'b.mkv')
+    queue.add(first)
+    queue.dispatch()
+    queue.add(other)
+    queue.add(first)
+    executor.finish(first)
+    assert _rel(src, _run_all(queue, executor)) == ['a.mkv', 'b.mkv', 'a.mkv']
 
 
 def test_a_failed_encode_frees_its_worker_and_is_logged(src, priority_file, caplog):

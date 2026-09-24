@@ -1300,14 +1300,23 @@ class EncodeQueue:
         self._pending = {}    # path -> arrival number
         self._heap = []       # (priority key, arrival number, path) for every pending path
         self._running = set()
+        self._requeue = set()  # running paths asked for again while they ran
         self._arrivals = 0
         self._index = {}
         self._signature = object()  # matches no real signature, so the first pick reads the file
 
     def add(self, path):
-        """Queue path unless it is already waiting or running.  True when it was queued."""
+        """Queue path unless it is already waiting.  True when it was queued now.
+
+        A path asked for while it runs is queued again once that run ends: the source may
+        have been replaced at the same path mid-encode, as an upgrade by a download manager
+        does, and the encode of the old file cannot stand for the new one.
+        """
         with self._cond:
-            if path in self._pending or path in self._running:
+            if path in self._pending:
+                return False
+            if path in self._running:
+                self._requeue.add(path)
                 return False
             self._arrivals += 1
             self._pending[path] = self._arrivals
@@ -1348,6 +1357,9 @@ class EncodeQueue:
     def _finished(self, path, future):
         with self._cond:
             self._running.discard(path)
+            if path in self._requeue:
+                self._requeue.discard(path)
+                self.add(path)
             self._cond.notify_all()
         if future is not None and not future.cancelled() and future.exception() is not None:
             logging.error(f'Encoding {path} raised: {future.exception()!r}')
