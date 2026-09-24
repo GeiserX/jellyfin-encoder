@@ -180,6 +180,82 @@ def test_a_missing_file_is_reported_once(src, priority_file, caplog):
     assert caplog.text.count('No priority list in use') == 1
 
 
+def _run_on_thread(queue, paths, monkeypatch, workers=2):
+    """Start the real dispatcher thread over a thread pool; returns the order the paths ran in."""
+    ran = []
+    lock = threading.Lock()
+
+    def fake_encode(path, processed_files, processing_files):
+        with lock:
+            ran.append(path)
+
+    monkeypatch.setattr(monitor, 'encode_video', fake_encode)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    try:
+        queue._executor = pool
+        for path in paths:
+            queue.add(path)
+        queue.start()
+        deadline = time.monotonic() + 30
+        while len(ran) < len(paths) and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        pool.shutdown(wait=True)
+    return ran
+
+
+def test_a_deeply_nested_file_leaves_the_dispatcher_running_in_arrival_order(src, priority_file, monkeypatch, caplog):
+    """Nesting past the parser's recursion limit raises RecursionError, which is not a ValueError."""
+    priority_file.write_text('{"paths": ' + '[' * 100000 + ']' * 100000 + '}')
+    queue, _ = _queue(src, priority_file, max_workers=1)
+    arrivals = [_abs(src, rel) for rel in ['Zeta/z.mkv', 'Show A/E01.mkv', 'Alpha/a.mkv']]
+    with caplog.at_level(logging.WARNING):
+        assert _run_on_thread(queue, arrivals, monkeypatch, workers=1) == arrivals
+    assert 'RecursionError' in caplog.text
+    assert caplog.text.count('is unreadable or not JSON') == 1
+
+
+def test_an_unexpected_error_reading_the_file_leaves_the_dispatcher_running(src, priority_file, monkeypatch, caplog):
+    _write_list(priority_file, ['Show A/'])
+    queue, executor = _queue(src, priority_file)
+    for rel in ['Show B/E01.mkv', 'Show A/E01.mkv', 'Show C/E01.mkv']:
+        queue.add(_abs(src, rel))
+    queue.dispatch()
+    assert _rel(src, executor.started()) == ['Show A/E01.mkv']
+
+    def broken_load(*args, **kwargs):
+        raise RuntimeError('unexpected')
+
+    monkeypatch.setattr(monitor.json, 'load', broken_load)
+    _write_list(priority_file, ['Show C/'], bump=5)
+    executor.finish(_abs(src, 'Show A/E01.mkv'))
+    with caplog.at_level(logging.WARNING):
+        order = _rel(src, _run_all(queue, executor))
+    # An unusable file means no list, as for invalid JSON: the rest runs in arrival order.
+    assert order == ['Show A/E01.mkv', 'Show B/E01.mkv', 'Show C/E01.mkv']
+    assert 'RuntimeError: unexpected' in caplog.text
+
+
+def test_the_dispatcher_thread_logs_an_error_and_carries_on(src, priority_file, monkeypatch, caplog):
+    monkeypatch.setattr(monitor, 'DISPATCH_RETRY_SECONDS', 0.01)
+    real_signature = monitor._file_signature
+    calls = {'n': 0}
+
+    def fails_once(path):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise RuntimeError('boom inside dispatch')
+        return real_signature(path)
+
+    monkeypatch.setattr(monitor, '_file_signature', fails_once)
+    queue, _ = _queue(src, priority_file)
+    paths = [_abs(src, f'{n}.mkv') for n in range(5)]
+    with caplog.at_level(logging.ERROR):
+        assert sorted(_run_on_thread(queue, paths, monkeypatch)) == sorted(paths)
+    assert 'Encode dispatcher failed; retrying' in caplog.text
+    assert 'boom inside dispatch' in caplog.text
+
+
 # ── the queue honours the list ───────────────────────────────────────────
 
 

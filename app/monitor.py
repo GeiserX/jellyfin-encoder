@@ -1211,6 +1211,9 @@ def scan_source_directory():
 # Rank of a file that no priority entry covers: after every matched file.
 UNMATCHED = sys.maxsize
 
+# Seconds the dispatcher waits before trying again after an unexpected error.
+DISPATCH_RETRY_SECONDS = 60
+
 
 def _path_parts(path):
     """A relative path as a tuple of components, whatever separator it was written with."""
@@ -1229,8 +1232,10 @@ def load_priority_entries(path):
             data = json.load(f)
     except FileNotFoundError:
         return []
-    except (OSError, ValueError) as e:
-        logging.warning(f'Priority list {path} is unreadable or not JSON ({e}); ignoring it')
+    except Exception as e:
+        # Anything, not just OSError and ValueError: nesting deeper than the parser's
+        # recursion limit raises RecursionError, and the dispatcher must outlive any file.
+        logging.warning(f'Priority list {path} is unreadable or not JSON ({type(e).__name__}: {e}); ignoring it')
         return []
     paths = data.get('paths') if isinstance(data, dict) else None
     if not isinstance(paths, list):
@@ -1352,7 +1357,13 @@ class EncodeQueue:
         while True:
             with self._cond:
                 self._cond.wait_for(lambda: self._pending and len(self._running) < self._max_workers)
-            self.dispatch()
+            # This thread is the only thing that starts encodes; if it died, every file
+            # found afterwards would wait for a restart.
+            try:
+                self.dispatch()
+            except Exception:
+                logging.exception(f'Encode dispatcher failed; retrying in {DISPATCH_RETRY_SECONDS}s')
+                time.sleep(DISPATCH_RETRY_SECONDS)
 
     def _finished(self, path, future):
         with self._cond:
