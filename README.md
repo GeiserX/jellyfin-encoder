@@ -103,6 +103,7 @@ All settings are controlled via environment variables.
 | `DEST_MIN_FREE_GB` | `0` | Free-space floor for the destination, in GB: encodes wait while the destination filesystem has less than this free (see [Free-space floor](#free-space-floor)) |
 | `FFMPEG_LOGLEVEL` | `warning` | What FFmpeg writes to the container log during an encode (see [FFmpeg log level](#ffmpeg-log-level)) |
 | `PRIORITY_FILE` | `$SOURCE_FOLDER/.encoder-priority.json` | JSON list of source paths to encode before the rest (see [Priority list](#priority-list)) |
+| `JELLYFIN_URL` | _(empty)_ | Ask this Jellyfin server what people watch and encode that first (see [Prioritise what people watch](#prioritise-what-people-watch-jellyfin)) |
 
 ## Quality Presets
 
@@ -239,6 +240,62 @@ which one runs first:
 
 ```
 Priority list /app/source/.encoder-priority.json: 3 entries, 42 of 51876 pending files match; first: Show A (2001)/Season 02/S02E05.mkv
+```
+
+### Prioritise what people watch (Jellyfin)
+
+Point the encoder at your Jellyfin server and it works out the priority list itself. You
+don't need to write a producer for `PRIORITY_FILE`. Every `PRIORITY_REFRESH_MINUTES` it asks
+Jellyfin, for each user:
+
+- **Next up.** Jellyfin's own next episode for each series the user watched in the last
+  `PRIORITY_WINDOW_DAYS`, plus the episodes after it, `PRIORITY_NEXT_EPISODES` in all.
+- **Continue watching.** Movies and episodes the user stopped partway through, so an
+  encoder for a movie library benefits too.
+
+Titles are ranked by when anyone last played them, most recent first. Next episodes of
+every show come first. After them come each show's season folders: the season the viewer
+is on, the ones after it, then the earlier ones. That way the rest of a show people watch
+is encoded before the rest of the library. Entries from `PRIORITY_FILE` rank above all of
+this, and a path that appears in both keeps its place in the file.
+
+| Variable | Default | Description |
+|---|---|---|
+| `JELLYFIN_URL` | _(empty)_ | Jellyfin base URL, e.g. `http://jellyfin:8096`. Empty turns the feature off |
+| `JELLYFIN_API_KEY` | _(empty)_ | An API key from Dashboard > API Keys, sent as `Authorization: MediaBrowser Token="..."` |
+| `JELLYFIN_PATH_PREFIX` | `SOURCE_FOLDER` | The path at which Jellyfin sees this encoder's `SOURCE_FOLDER`, e.g. `/media/Series`. Items outside it are ignored |
+| `PRIORITY_USERS` | _(all)_ | Comma-separated Jellyfin usernames to consider |
+| `PRIORITY_EXCLUDE_USERS` | _(none)_ | Comma-separated usernames to leave out |
+| `PRIORITY_REFRESH_MINUTES` | `20` | Minutes between refreshes |
+| `PRIORITY_NEXT_EPISODES` | `3` | Episodes per series to rank, counting the next-up one |
+| `PRIORITY_WINDOW_DAYS` | `60` | Only shows and paused items played within this many days count |
+
+Usernames match without case. Disabled users are skipped. Paths match on whole folder names,
+so a prefix of `/media/Series` leaves `/media/Series Extra` alone, and a Jellyfin server
+running on Windows works too.
+
+```yaml
+services:
+  jellyfin-encoder:
+    image: drumsergio/jellyfin-encoder:1.4.0
+    volumes:
+      - /path/to/series:/app/source:ro
+      - /path/to/series-720p:/app/destination
+    environment:
+      JELLYFIN_URL: "http://jellyfin:8096"
+      JELLYFIN_API_KEY: "${JELLYFIN_API_KEY}"
+      JELLYFIN_PATH_PREFIX: "/media/Series"   # where Jellyfin mounts /path/to/series
+      PRIORITY_EXCLUDE_USERS: "guest"
+```
+
+A refresh runs on its own thread, so a slow or unreachable Jellyfin never holds up an encode.
+At startup the encoder waits up to two minutes for the first answer before it starts the
+first encode. A failed refresh keeps the previous list and logs one line. The key never
+reaches the log. Each refresh logs how many users it considered, how many entries it
+produced, the first one and how long it took:
+
+```
+Jellyfin priority: 4 users, 212 entries in 3.8s; first: Show A (2001)/Season 02/S02E03.mkv
 ```
 
 ### FFmpeg log level

@@ -23,7 +23,7 @@ docker compose up
 ```
 
 ## Architecture
-- `app/monitor.py` — main monitoring and transcoding logic; `EncodeQueue` holds files waiting to encode and a dispatcher thread feeds the process pool one file per free worker, in `PRIORITY_FILE` order
+- `app/monitor.py` — main monitoring and transcoding logic; `EncodeQueue` holds files waiting to encode and a dispatcher thread feeds the process pool one file per free worker, in `PRIORITY_FILE` order; with `JELLYFIN_URL` set, `JellyfinPriority` refreshes on its own thread and adds what people watch (next up, continue watching) as entries ranked after the file's
 - `app/requirements.txt` — Python dependencies
 - `tests/` — test suite
 - `scripts/` — helper scripts
