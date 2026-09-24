@@ -102,6 +102,7 @@ All settings are controlled via environment variables.
 | `POLL_INTERVAL` | `60` | Seconds the folder watcher waits between scans of the source tree (see [Polling interval](#polling-interval)) |
 | `DEST_MIN_FREE_GB` | `0` | Free-space floor for the destination, in GB: encodes wait while the destination filesystem has less than this free (see [Free-space floor](#free-space-floor)) |
 | `FFMPEG_LOGLEVEL` | `warning` | What FFmpeg writes to the container log during an encode (see [FFmpeg log level](#ffmpeg-log-level)) |
+| `PRIORITY_FILE` | `$SOURCE_FOLDER/.encoder-priority.json` | JSON list of source paths to encode before the rest (see [Priority list](#priority-list)) |
 
 ## Quality Presets
 
@@ -199,6 +200,46 @@ that holds the originals.
 ### Free-space floor
 
 `DEST_MIN_FREE_GB=1000` makes the encoder hold each new encode while the destination filesystem has less than 1 TB free, re-check every five minutes, and carry on by itself when space returns. Encodes already running finish, and the floor is checked again after the wait for a still-growing source, right before ffmpeg starts. If the free space cannot be read at all, the encode proceeds and ffmpeg reports whatever is really wrong, so the floor is a courtesy to the disk's other tenants, not a guarantee against ENOSPC. Use it when the destination shares a disk with something that must never see ENOSPC, such as an object store node or a database. The default `0` keeps the old behaviour: encode until the disk is full.
+
+### Priority list
+
+At every start the encoder queues every source in the order the folder walk finds them, so
+on a large library the next episode of a show people are watching can sit thousands of files
+down the queue. `PRIORITY_FILE` lets something outside the encoder put those first. The
+encoder only reads it, so it can live on a read-only source mount.
+
+```json
+{
+  "generated": "2026-01-01T00:00:00Z",
+  "paths": [
+    "Show A (2001)/Season 02/",
+    "Film B (2002)/Film B (2002).mkv",
+    "Show C (2003)/"
+  ]
+}
+```
+
+- Each entry is a path relative to `SOURCE_FOLDER`: a folder (ends with `/`) or one file.
+  The list is in priority order, highest first.
+- A queued file belongs to the first entry that is its own path or a folder holding it.
+  Matching is on whole path components, so `Show A/` covers `Show A/S01/E01.mkv` and not
+  `Show AB/S01/E01.mkv`.
+- Files of an earlier entry encode before files of a later one. Within one entry they go in
+  path order, so `S01E01` comes before `S01E02`. Files no entry covers go last, in the order
+  they were queued.
+- Before each pick the encoder checks the file's modification time and size, and re-reads it
+  when either changed. A new list re-orders what is still waiting; encodes already running
+  finish. A file the watcher finds later goes straight to its place in the order.
+- A missing, unreadable, empty or invalid file changes nothing. The queue runs in the order
+  files were found, as it did before this setting existed, and the encoder logs each change
+  of state once, not on every pick.
+
+At startup, and on every reload, the log says how many waiting files the list matched and
+which one runs first:
+
+```
+Priority list /app/source/.encoder-priority.json: 3 entries, 42 of 51876 pending files match; first: Show A (2001)/Season 02/S02E05.mkv
+```
 
 ### FFmpeg log level
 
@@ -326,7 +367,7 @@ Key design decisions:
 - **Polling observer** (`watchdog.PollingObserver`) instead of inotify, ensuring compatibility with NFS, CIFS, and other network filesystems.
 - **Temp-file workflow** -- encodes to a `.tmp` file first and atomically renames on success, preventing Jellyfin from indexing incomplete files.
 - **File-growth detection** -- before deleting stale `.tmp` files, the cleanup routine checks whether the file is still being written by another instance.
-- **ProcessPoolExecutor** -- one worker for hardware encoding (GPU is the bottleneck), multiple workers for software encoding (CPU-bound).
+- **ProcessPoolExecutor behind a priority queue** -- one worker for hardware encoding (GPU is the bottleneck), multiple workers for software encoding (CPU-bound). Files wait in the encoder's own queue, and a dispatcher thread hands the executor the next one by [priority](#priority-list) whenever a worker frees up, so the executor never holds more than it can run.
 - **Container-agnostic output lookup** -- an encode is located by filename stem across every container the tool writes, so changing codec or container never re-encodes a library that is already done.
 
 ### Polling interval

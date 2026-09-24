@@ -8,8 +8,10 @@ if platform.system() != 'Windows':
 else:
     import msvcrt
 
+import heapq
 import shutil
 import subprocess
+import threading
 import concurrent.futures
 from multiprocessing import Manager, freeze_support
 from watchdog.observers.polling import PollingObserver
@@ -31,6 +33,9 @@ MAX_AUDIO_CHANNELS = 6  # 5.1 - the most AAC preserves from the source
 
 SOURCE_FOLDER = os.getenv('SOURCE_FOLDER', '/app/source')
 DEST_FOLDER = os.getenv('DEST_FOLDER', '/app/destination')
+
+# Paths to encode first, written by a job outside the encoder (see "Priority list" in the README).
+PRIORITY_FILE = os.getenv('PRIORITY_FILE') or os.path.join(SOURCE_FOLDER, '.encoder-priority.json')
 
 # Symlink settings for Jellyfin multi-version support
 # SYMLINK_TARGET_PREFIX: The path prefix for symlink targets AS SEEN BY THE SOURCE HOST
@@ -465,7 +470,8 @@ logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER},
              f'MANIFEST_TARGET={SYMLINK_MANIFEST_TARGET or "disabled"}, '
              f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}, '
              f'POLL_INTERVAL={POLL_INTERVAL:g}s, '
-             f'FFMPEG_LOGLEVEL={FFMPEG_LOGLEVEL}')
+             f'FFMPEG_LOGLEVEL={FFMPEG_LOGLEVEL}, '
+             f'PRIORITY_FILE={PRIORITY_FILE}')
 
 
 class VideoHandler(FileSystemEventHandler):
@@ -1200,8 +1206,207 @@ def scan_source_directory():
     return files
 
 
+# ── Priority list and encode queue ──────────────────────────────────────────
+
+# Rank of a file that no priority entry covers: after every matched file.
+UNMATCHED = sys.maxsize
+
+# Seconds the dispatcher waits before trying again after an unexpected error.
+DISPATCH_RETRY_SECONDS = 60
+
+
+def _path_parts(path):
+    """A relative path as a tuple of components, whatever separator it was written with."""
+    return tuple(p for p in path.replace(os.sep, '/').split('/') if p not in ('', '.'))
+
+
+def load_priority_entries(path):
+    """The entries of the priority list at path, highest priority first.
+
+    [] when the file is missing, unreadable, invalid or lists nothing, which leaves the
+    queue in arrival order.  Only called when the file changed, so a broken file warns
+    once, not once per pick.
+    """
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        # Anything, not just OSError and ValueError: nesting deeper than the parser's
+        # recursion limit raises RecursionError, and the dispatcher must outlive any file.
+        logging.warning(f'Priority list {path} is unreadable or not JSON ({type(e).__name__}: {e}); ignoring it')
+        return []
+    paths = data.get('paths') if isinstance(data, dict) else None
+    if not isinstance(paths, list):
+        logging.warning(f'Priority list {path} has no "paths" list; ignoring it')
+        return []
+    return [p for p in paths if isinstance(p, str)]
+
+
+def priority_index(entries):
+    """Map each entry's path components to its rank; an entry listed twice keeps its first rank."""
+    index = {}
+    for rank, entry in enumerate(entries):
+        parts = _path_parts(entry)
+        if parts:
+            index.setdefault(parts, rank)
+    return index
+
+
+def priority_rank(rel_path, index):
+    """Rank of the first entry that is rel_path or a folder holding it, else UNMATCHED.
+
+    Matching is on whole components, so `Show A/` covers `Show A/x.mkv` and not
+    `Show AB/x.mkv`.  One dict lookup per component keeps a reload over tens of
+    thousands of pending files cheap however long the list is.
+    """
+    parts = _path_parts(rel_path)
+    return min((index.get(parts[:n], UNMATCHED) for n in range(1, len(parts) + 1)),
+               default=UNMATCHED)
+
+
+def _priority_key(rel_path, index):
+    """Sort key: entry rank, then path components within an entry; unmatched files tie."""
+    rank = priority_rank(rel_path, index)
+    return (rank, _path_parts(rel_path) if rank != UNMATCHED else ())
+
+
+def order_pending(rel_paths, entries):
+    """rel_paths in the order they will encode.  The sort is stable, so unmatched files keep theirs."""
+    index = priority_index(entries)
+    return sorted(rel_paths, key=lambda p: _priority_key(p, index))
+
+
+def _file_signature(path):
+    """(mtime, size) of path, or None when it cannot be stat'ed."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+class EncodeQueue:
+    """Source files waiting to encode, handed to the executor in priority order.
+
+    At most max_workers files are in the executor at once, so a file waits here, where a
+    changed priority list can still move it, rather than in the executor's own FIFO.
+    The priority file is stat'ed before every pick and re-read when it changed; that
+    re-orders what is waiting and never touches what is running.
+    """
+
+    def __init__(self, executor, max_workers, processed_files, processing_files, priority_file=None):
+        self._executor = executor
+        self._max_workers = max_workers
+        self._encode_args = (processed_files, processing_files)
+        self._priority_file = priority_file or PRIORITY_FILE
+        self._cond = threading.Condition()
+        self._pending = {}    # path -> arrival number
+        self._heap = []       # (priority key, arrival number, path) for every pending path
+        self._running = set()
+        self._requeue = set()  # running paths asked for again while they ran
+        self._arrivals = 0
+        self._index = {}
+        self._signature = object()  # matches no real signature, so the first pick reads the file
+
+    def add(self, path):
+        """Queue path unless it is already waiting.  True when it was queued now.
+
+        A path asked for while it runs is queued again once that run ends: the source may
+        have been replaced at the same path mid-encode, as an upgrade by a download manager
+        does, and the encode of the old file cannot stand for the new one.
+        """
+        with self._cond:
+            if path in self._pending:
+                return False
+            if path in self._running:
+                self._requeue.add(path)
+                return False
+            self._arrivals += 1
+            self._pending[path] = self._arrivals
+            heapq.heappush(self._heap, self._heap_item(path, self._arrivals))
+            self._cond.notify_all()
+            return True
+
+    def dispatch(self):
+        """Start pending files until every worker is busy.  Returns how many started."""
+        started = 0
+        while True:
+            with self._cond:
+                if not self._pending or len(self._running) >= self._max_workers:
+                    return started
+                path = self._pick()
+                self._running.add(path)
+            # Submitted outside the lock: the executor may complete a future, and so call
+            # _finished, from its own thread while it holds its own locks.
+            try:
+                future = self._executor.submit(encode_video, path, *self._encode_args)
+            except Exception as e:
+                logging.error(f'Could not start encoding {path}: {e}')
+                self._finished(path, None)
+                continue
+            future.add_done_callback(lambda f, p=path: self._finished(p, f))
+            started += 1
+
+    def start(self):
+        """Run dispatch() on a daemon thread whenever a file waits and a worker is free."""
+        threading.Thread(target=self._run, name='encode-dispatcher', daemon=True).start()
+
+    def _run(self):
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: self._pending and len(self._running) < self._max_workers)
+            # This thread is the only thing that starts encodes; if it died, every file
+            # found afterwards would wait for a restart.
+            try:
+                self.dispatch()
+            except Exception:
+                logging.exception(f'Encode dispatcher failed; retrying in {DISPATCH_RETRY_SECONDS}s')
+                time.sleep(DISPATCH_RETRY_SECONDS)
+
+    def _finished(self, path, future):
+        with self._cond:
+            self._running.discard(path)
+            if path in self._requeue:
+                self._requeue.discard(path)
+                self.add(path)
+            self._cond.notify_all()
+        if future is not None and not future.cancelled() and future.exception() is not None:
+            logging.error(f'Encoding {path} raised: {future.exception()!r}')
+
+    def _heap_item(self, path, arrival):
+        return (_priority_key(os.path.relpath(path, SOURCE_FOLDER), self._index), arrival, path)
+
+    def _pick(self):
+        """Pop the next path to encode.  Called with the lock held and at least one path pending."""
+        self._reload_priority()
+        _, _, path = heapq.heappop(self._heap)
+        del self._pending[path]
+        return path
+
+    def _reload_priority(self):
+        signature = _file_signature(self._priority_file)
+        if signature == self._signature:
+            return
+        self._signature = signature
+        entries = load_priority_entries(self._priority_file) if signature else []
+        self._index = priority_index(entries)
+        self._heap = [self._heap_item(p, n) for p, n in self._pending.items()]
+        heapq.heapify(self._heap)
+        if not self._index:
+            logging.info(f'No priority list in use ({self._priority_file}); encoding in arrival order')
+            return
+        matched = sum(1 for key, _, _ in self._heap if key[0] != UNMATCHED)
+        first = ''
+        if matched:
+            first = f'; first: {os.path.relpath(self._heap[0][2], SOURCE_FOLDER)}'
+        logging.info(f'Priority list {self._priority_file}: {len(entries)} entries, '
+                     f'{matched} of {len(self._pending)} pending files match{first}')
+
+
 def submit_encoding_task(file_path):
-    executor.submit(encode_video, file_path, processed_files, processing_files)
+    encode_queue.add(file_path)
 
 def _dest_mount_healthy():
     """Quick check that the destination mount is responsive and populated.
@@ -1460,6 +1665,7 @@ if __name__ == "__main__":
     max_workers = max(1, int(os.getenv('MAX_HW_WORKERS', '1') or '1')) if ENABLE_HW_ACCEL else (os.cpu_count() or 1)
     logging.info(f'Running with {max_workers} workers')
     executor = concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
+    encode_queue = EncodeQueue(executor, max_workers, processed_files, processing_files)
 
     # Preflight: exit cleanly if SOURCE_FOLDER is not a valid directory
     if not os.path.isdir(SOURCE_FOLDER):
@@ -1475,6 +1681,9 @@ if __name__ == "__main__":
     observer = start_monitoring()
     for file_path in scan_source_directory():
         submit_encoding_task(file_path)
+    # Started only once the whole library is queued: an encode can hold a worker for hours,
+    # so the first picks must see every file, not just the first few the walk found.
+    encode_queue.start()
 
     last_cleanup = time.time()
     cleanup_interval_seconds = CLEANUP_INTERVAL_HOURS * 3600

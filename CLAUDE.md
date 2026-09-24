@@ -23,7 +23,7 @@ docker compose up
 ```
 
 ## Architecture
-- `app/monitor.py` — main monitoring and transcoding logic
+- `app/monitor.py` — main monitoring and transcoding logic; `EncodeQueue` holds files waiting to encode and a dispatcher thread feeds the process pool one file per free worker, in `PRIORITY_FILE` order
 - `app/requirements.txt` — Python dependencies
 - `tests/` — test suite
 - `scripts/` — helper scripts
