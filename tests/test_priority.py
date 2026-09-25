@@ -128,6 +128,33 @@ def test_no_entries_keeps_the_existing_order():
     assert monitor.order_pending(paths, []) == paths
 
 
+NFC_NAME = 'Caf\u00e9 A (2001)'   # precomposed e-acute
+NFD_NAME = 'Cafe\u0301 A (2001)'  # e plus a combining acute accent
+
+
+@pytest.mark.parametrize('entry, queued', [(NFD_NAME, NFC_NAME), (NFC_NAME, NFD_NAME)])
+def test_an_entry_matches_whichever_unicode_normal_form_either_side_uses(entry, queued):
+    assert entry != queued
+    index = monitor.priority_index([entry + '/S01/'])
+    assert monitor.priority_rank(queued + '/S01/E01.mkv', index) == 0
+    assert monitor.order_pending(['Other/x.mkv', queued + '/S01/E01.mkv'], [entry + '/']) == [
+        queued + '/S01/E01.mkv', 'Other/x.mkv']
+
+
+def test_matching_is_otherwise_exact_and_case_sensitive():
+    index = monitor.priority_index(['Show A/'])
+    assert monitor.priority_rank('show a/E01.mkv', index) == monitor.UNMATCHED
+    assert monitor.priority_rank('SHOW A/E01.mkv', index) == monitor.UNMATCHED
+
+
+def test_the_queue_matches_an_nfd_list_against_nfc_paths(src, priority_file):
+    _write_list(priority_file, [NFD_NAME + '/'])
+    queue, executor = _queue(src, priority_file)
+    for rel in ['Other/x.mkv', NFC_NAME + '/S01/E01.mkv']:
+        queue.add(_abs(src, rel))
+    assert _rel(src, _run_all(queue, executor)) == [NFC_NAME + '/S01/E01.mkv', 'Other/x.mkv']
+
+
 def test_empty_and_non_string_entries_match_nothing(priority_file):
     priority_file.write_text(json.dumps({'paths': ['', '/', 7, None, 'Show A/']}))
     entries = monitor.load_priority_entries(str(priority_file))

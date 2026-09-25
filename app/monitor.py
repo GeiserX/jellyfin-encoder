@@ -12,6 +12,7 @@ import heapq
 import shutil
 import subprocess
 import threading
+import unicodedata
 import concurrent.futures
 from multiprocessing import Manager, freeze_support
 from watchdog.observers.polling import PollingObserver
@@ -1216,7 +1217,13 @@ DISPATCH_RETRY_SECONDS = 60
 
 
 def _path_parts(path):
-    """A relative path as a tuple of components, whatever separator it was written with."""
+    """A relative path as a tuple of components, whatever separator it was written with.
+
+    Components are in Unicode NFC, so a name spelled with a precomposed 'é' matches the
+    same name spelled 'e' plus a combining accent, as macOS and some tools write it.
+    Nothing else is folded: case still has to match.
+    """
+    path = unicodedata.normalize('NFC', path)
     return tuple(p for p in path.replace(os.sep, '/').split('/') if p not in ('', '.'))
 
 

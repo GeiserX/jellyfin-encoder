@@ -225,6 +225,9 @@ encoder only reads it, so it can live on a read-only source mount.
 - A queued file belongs to the first entry that is its own path or a folder holding it.
   Matching is on whole path components, so `Show A/` covers `Show A/S01/E01.mkv` and not
   `Show AB/S01/E01.mkv`.
+- Both sides are compared in Unicode NFC, so an accented name matches whether the list or
+  the filesystem spells `é` as one character or as `e` plus a combining accent. Nothing else
+  is folded: `show a/` does not match `Show A/`.
 - Files of an earlier entry encode before files of a later one. Within one entry they go in
   path order, so `S01E01` comes before `S01E02`. Files no entry covers go last, in the order
   they were queued.
