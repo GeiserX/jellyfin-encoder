@@ -1760,6 +1760,7 @@ def warn_if_image_moved():
 
 def start_monitoring():
     """Wire VideoHandler to the polling observer and start watching."""
+    warn_if_image_moved()
     observer = create_observer(VideoHandler())
     observer.start()
     logging.info(f'Monitoring started (polling every {POLL_INTERVAL:g}s).')
@@ -1768,7 +1769,6 @@ def start_monitoring():
 
 if __name__ == "__main__":
     freeze_support()
-    warn_if_image_moved()
     manager = Manager()
     processed_files, processing_files = manager.dict(), manager.dict()
     max_workers = max(1, int(os.getenv('MAX_HW_WORKERS', '1') or '1')) if ENABLE_HW_ACCEL else (os.cpu_count() or 1)
