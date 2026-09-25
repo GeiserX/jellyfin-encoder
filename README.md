@@ -103,6 +103,7 @@ All settings are controlled via environment variables.
 | `DEST_MIN_FREE_GB` | `0` | Free-space floor for the destination, in GB: encodes wait while the destination filesystem has less than this free (see [Free-space floor](#free-space-floor)) |
 | `FFMPEG_LOGLEVEL` | `warning` | What FFmpeg writes to the container log during an encode (see [FFmpeg log level](#ffmpeg-log-level)) |
 | `PRIORITY_FILE` | `$SOURCE_FOLDER/.encoder-priority.json` | JSON list of source paths to encode before the rest (see [Priority list](#priority-list)) |
+| `PRIORITY_MAX_AGE_HOURS` | `0` | Hours a priority list counts after its `generated` time; older lists are ignored. `0` turns the check off (see [Priority list](#priority-list)) |
 
 ## Quality Presets
 
@@ -237,6 +238,15 @@ encoder only reads it, so it can live on a read-only source mount.
 - A missing, unreadable, empty or invalid file changes nothing. The queue runs in the order
   files were found, as it did before this setting existed, and the encoder logs each change
   of state once, not on every pick.
+- `PRIORITY_MAX_AGE_HOURS` guards against a producer that stopped running. When it is above
+  `0`, a list whose `generated` time is older than that many hours counts as absent, and so
+  does a list whose `generated` is missing or is not an ISO 8601 time with `Z` or a UTC
+  offset (`2026-01-01T00:00:00Z`, `2026-01-01T01:00:00+01:00`). The age is checked at every
+  pick, so a list expires without being touched, and it counts again once it is rewritten
+  with a recent time. The log says why the list was set aside, once per change. A producer
+  should rewrite the file at least once a day, and the setting should leave room for a
+  missed run: with a daily producer, `48` survives one failure and ignores the list after
+  the second. The default `0` never reads `generated`.
 
 At startup, and on every reload, the log says how many waiting files the list matched and
 which one runs first:
