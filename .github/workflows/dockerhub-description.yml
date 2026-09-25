@@ -16,4 +16,5 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: drumsergio/jellyfin-encoder
+          repository: drumsergio/quality-gate-encoder
+          short-description: "Quality Gate's encoder for Jellyfin: pre-encodes a library into 720p HEVC, H.264 or AV1 versions."

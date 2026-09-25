@@ -13,7 +13,8 @@ on:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAME: drumsergio/jellyfin-encoder
+  IMAGE_NAME: drumsergio/quality-gate-encoder
+  OLD_IMAGE_NAME: drumsergio/jellyfin-encoder
 
 jobs:
   test:
@@ -89,6 +90,20 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Every release also goes to the old name until 2027-03-31; those images log a "this image moved" notice.
+      - name: Build and push Docker image under the old name
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: IMAGE_MOVED_TO=${{ env.IMAGE_NAME }}
+          tags: |
+            ${{ env.OLD_IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.OLD_IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -15,7 +15,7 @@ Usage:
     python migrate_encode_names.py --source /app/source --dest /app/destination --apply
 
     # Inside a running container (reads SOURCE_FOLDER / DEST_FOLDER env vars)
-    docker exec jellyfin-encoder python /app/scripts/migrate_encode_names.py --apply
+    docker exec quality-gate-encoder python /app/scripts/migrate_encode_names.py --apply
 """
 import argparse
 import os
