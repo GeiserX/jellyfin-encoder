@@ -105,6 +105,7 @@ All settings are controlled via environment variables.
 | `DEST_MIN_FREE_GB` | `0` | Free-space floor for the destination, in GB: encodes wait while the destination filesystem has less than this free (see [Free-space floor](#free-space-floor)) |
 | `FFMPEG_LOGLEVEL` | `warning` | What FFmpeg writes to the container log during an encode (see [FFmpeg log level](#ffmpeg-log-level)) |
 | `PRIORITY_FILE` | `$SOURCE_FOLDER/.encoder-priority.json` | JSON list of source paths to encode before the rest (see [Priority list](#priority-list)) |
+| `PRIORITY_MAX_AGE_HOURS` | `0` | Hours a priority list counts after its `generated` time; older lists are ignored. `0` turns the check off (see [Priority list](#priority-list)) |
 
 ## Quality Presets
 
@@ -221,11 +222,15 @@ encoder only reads it, so it can live on a read-only source mount.
 }
 ```
 
+- The file is UTF-8 JSON. A leading byte order mark, as some Windows tools write, is fine.
 - Each entry is a path relative to `SOURCE_FOLDER`: a folder (ends with `/`) or one file.
   The list is in priority order, highest first.
 - A queued file belongs to the first entry that is its own path or a folder holding it.
   Matching is on whole path components, so `Show A/` covers `Show A/S01/E01.mkv` and not
   `Show AB/S01/E01.mkv`.
+- Both sides are compared in Unicode NFC, so an accented name matches whether the list or
+  the filesystem spells `é` as one character or as `e` plus a combining accent. Nothing else
+  is folded: `show a/` does not match `Show A/`.
 - Files of an earlier entry encode before files of a later one. Within one entry they go in
   path order, so `S01E01` comes before `S01E02`. Files no entry covers go last, in the order
   they were queued.
@@ -235,6 +240,16 @@ encoder only reads it, so it can live on a read-only source mount.
 - A missing, unreadable, empty or invalid file changes nothing. The queue runs in the order
   files were found, as it did before this setting existed, and the encoder logs each change
   of state once, not on every pick.
+- `PRIORITY_MAX_AGE_HOURS` guards against a producer that stopped running. When it is above
+  `0`, a list whose `generated` time is older than that many hours counts as absent, and so
+  does a list whose `generated` is missing or is not an ISO 8601 extended time, with a `T`
+  between date and time and a `Z` or UTC offset (`2026-01-01T00:00:00Z`,
+  `2026-01-01T01:00:00+01:00`). The age is checked at every
+  pick, so a list expires without being touched, and it counts again once it is rewritten
+  with a recent time. The log says why the list was set aside, once per change. A producer
+  should rewrite the file at least once a day, and the setting should leave room for a
+  missed run: with a daily producer, `48` survives one failure and ignores the list after
+  the second. The default `0` never reads `generated`.
 
 At startup, and on every reload, the log says how many waiting files the list matched and
 which one runs first:

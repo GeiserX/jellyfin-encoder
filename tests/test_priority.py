@@ -128,11 +128,47 @@ def test_no_entries_keeps_the_existing_order():
     assert monitor.order_pending(paths, []) == paths
 
 
+NFC_NAME = 'Caf\u00e9 A (2001)'   # precomposed e-acute
+NFD_NAME = 'Cafe\u0301 A (2001)'  # e plus a combining acute accent
+
+
+@pytest.mark.parametrize('entry, queued', [(NFD_NAME, NFC_NAME), (NFC_NAME, NFD_NAME)])
+def test_an_entry_matches_whichever_unicode_normal_form_either_side_uses(entry, queued):
+    assert entry != queued
+    index = monitor.priority_index([entry + '/S01/'])
+    assert monitor.priority_rank(queued + '/S01/E01.mkv', index) == 0
+    assert monitor.order_pending(['Other/x.mkv', queued + '/S01/E01.mkv'], [entry + '/']) == [
+        queued + '/S01/E01.mkv', 'Other/x.mkv']
+
+
+def test_matching_is_otherwise_exact_and_case_sensitive():
+    index = monitor.priority_index(['Show A/'])
+    assert monitor.priority_rank('show a/E01.mkv', index) == monitor.UNMATCHED
+    assert monitor.priority_rank('SHOW A/E01.mkv', index) == monitor.UNMATCHED
+
+
+def test_the_queue_matches_an_nfd_list_against_nfc_paths(src, priority_file):
+    _write_list(priority_file, [NFD_NAME + '/'])
+    queue, executor = _queue(src, priority_file)
+    for rel in ['Other/x.mkv', NFC_NAME + '/S01/E01.mkv']:
+        queue.add(_abs(src, rel))
+    assert _rel(src, _run_all(queue, executor)) == [NFC_NAME + '/S01/E01.mkv', 'Other/x.mkv']
+
+
 def test_empty_and_non_string_entries_match_nothing(priority_file):
     priority_file.write_text(json.dumps({'paths': ['', '/', 7, None, 'Show A/']}))
     entries = monitor.load_priority_entries(str(priority_file))
     assert entries == ['', '/', 'Show A/']
     assert monitor.order_pending(['x.mkv', 'Show A/y.mkv'], entries) == ['Show A/y.mkv', 'x.mkv']
+
+
+def test_a_leading_utf8_byte_order_mark_is_skipped(src, priority_file):
+    body = json.dumps({'paths': ['Show A (2001)/']}).encode('utf-8')
+    priority_file.write_bytes(b'\xef\xbb\xbf' + body)
+    queue, executor = _queue(src, priority_file)
+    for rel in ['Other/x.mkv', 'Show A (2001)/S01/E01.mkv']:
+        queue.add(_abs(src, rel))
+    assert _rel(src, _run_all(queue, executor)) == ['Show A (2001)/S01/E01.mkv', 'Other/x.mkv']
 
 
 # ── a missing or broken file changes nothing ─────────────────────────────
@@ -454,3 +490,136 @@ def test_main_reads_the_priority_list_after_queuing_the_whole_library(tmp_path):
     assert f'PRIORITY_FILE={listing}' in output
     assert '1 entries, 2 of 3 pending files match; first: ' + os.path.join(
         'Show B (2002)', 'S01', 'E01.mkv') in output
+
+
+# ── PRIORITY_MAX_AGE_HOURS ───────────────────────────────────────────────
+
+NOW = monitor.datetime.datetime(2026, 1, 10, 12, 0, tzinfo=monitor.datetime.timezone.utc)
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """The time the queue sees; move it with clock['now'] = ..."""
+    state = {'now': NOW}
+    monkeypatch.setattr(monitor, '_utcnow', lambda: state['now'])
+    return state
+
+
+def _write_dated(path, entries, generated, bump=0):
+    body = {'paths': entries}
+    if generated is not ...:
+        body['generated'] = generated
+    path.write_text(json.dumps(body))
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + bump * 1_000_000_000))
+
+
+def _dated_queue(src, priority_file, max_age_hours):
+    executor = FakeExecutor()
+    queue = monitor.EncodeQueue(executor, 1, {}, {}, priority_file=str(priority_file),
+                                max_age_hours=max_age_hours)
+    for rel in ['Other/x.mkv', 'Show A/E01.mkv', 'Show A/E02.mkv']:
+        queue.add(_abs(src, rel))
+    return queue, executor
+
+
+LISTED_FIRST = ['Show A/E01.mkv', 'Show A/E02.mkv', 'Other/x.mkv']
+ARRIVAL = ['Other/x.mkv', 'Show A/E01.mkv', 'Show A/E02.mkv']
+
+
+@pytest.mark.parametrize('value, expected', [('0', 0.0), ('24', 24.0), ('1.5', 1.5)])
+def test_parse_priority_max_age_hours_accepts_zero_and_positive_hours(value, expected):
+    assert monitor._parse_priority_max_age_hours(value) == expected
+
+
+@pytest.mark.parametrize('value', ['', 'abc', '-1', 'nan', 'inf', '1e999', None])
+def test_parse_priority_max_age_hours_falls_back_to_off_and_warns(value, caplog):
+    with caplog.at_level(logging.WARNING):
+        assert monitor._parse_priority_max_age_hours(value) == 0.0
+    assert 'PRIORITY_MAX_AGE_HOURS' in caplog.text
+
+
+@pytest.mark.parametrize('generated', ['2026-01-10T00:00:00Z', '2026-01-10T02:00:00+02:00', '2026-01-09T13:00:00.5+00:00',
+                                       '2026-01-09T13:00:00.1234567Z'])
+def test_a_list_younger_than_the_max_age_is_used(src, priority_file, clock, generated):
+    _write_dated(priority_file, ['Show A/'], generated)
+    queue, executor = _dated_queue(src, priority_file, max_age_hours=24)
+    assert _rel(src, _run_all(queue, executor)) == LISTED_FIRST
+
+
+def test_an_older_list_counts_as_absent_and_warns_once(src, priority_file, clock, caplog):
+    _write_dated(priority_file, ['Show A/'], '2026-01-09T11:00:00Z')
+    queue, executor = _dated_queue(src, priority_file, max_age_hours=24)
+    with caplog.at_level(logging.INFO):
+        assert _rel(src, _run_all(queue, executor)) == ARRIVAL
+    assert caplog.text.count('was generated 25.0 h ago, more than PRIORITY_MAX_AGE_HOURS=24') == 1
+    assert 'pending files match' not in caplog.text
+
+
+def test_the_utc_offset_counts_when_measuring_the_age(src, priority_file, clock):
+    # 12:00+02:00 is 10:00Z, two hours before NOW; read without its offset it would be now.
+    _write_dated(priority_file, ['Show A/'], '2026-01-10T12:00:00+02:00')
+    queue, executor = _dated_queue(src, priority_file, max_age_hours=1)
+    assert _rel(src, _run_all(queue, executor)) == ARRIVAL
+
+
+@pytest.mark.parametrize('generated, reason', [
+    (..., 'has no "generated" time'),
+    ('yesterday', 'is not ISO 8601'),
+    ('2026-01-10T11:00:00', 'is not ISO 8601'),     # no Z or offset
+    ('2026-01-10x11:00:00Z', 'is not ISO 8601'),    # fromisoformat takes any separator
+    ('2026-01-10 11:00:00Z', 'is not ISO 8601'),
+    (1767960000, 'is not ISO 8601'),
+    (None, 'has no "generated" time'),
+])
+def test_a_missing_or_unreadable_generated_time_counts_as_absent_while_the_check_is_on(
+        src, priority_file, clock, caplog, generated, reason):
+    _write_dated(priority_file, ['Show A/'], generated)
+    queue, executor = _dated_queue(src, priority_file, max_age_hours=24)
+    with caplog.at_level(logging.WARNING):
+        assert _rel(src, _run_all(queue, executor)) == ARRIVAL
+    assert caplog.text.count(reason) == 1
+
+
+@pytest.mark.parametrize('generated', [..., 'yesterday', '2020-01-01T00:00:00Z'])
+def test_with_the_check_off_the_generated_time_is_ignored(src, priority_file, clock, generated):
+    _write_dated(priority_file, ['Show A/'], generated)
+    queue, executor = _dated_queue(src, priority_file, max_age_hours=0)
+    assert _rel(src, _run_all(queue, executor)) == LISTED_FIRST
+
+
+def test_a_list_that_expires_without_changing_stops_counting_at_the_next_pick(src, priority_file, clock, caplog):
+    _write_dated(priority_file, ['Show A/', 'Other/'], '2026-01-10T00:00:00Z')
+    executor = FakeExecutor()
+    queue = monitor.EncodeQueue(executor, 1, {}, {}, priority_file=str(priority_file), max_age_hours=24)
+    for rel in ['Zeta/z.mkv', 'Other/x.mkv', 'Show A/E01.mkv', 'Show A/E02.mkv', 'Mid/m.mkv']:
+        queue.add(_abs(src, rel))
+    queue.dispatch()
+    assert _rel(src, executor.started()) == ['Show A/E01.mkv']
+
+    clock['now'] = NOW + monitor.datetime.timedelta(hours=13)   # 25 h after "generated"
+    executor.finish(_abs(src, 'Show A/E01.mkv'))
+    with caplog.at_level(logging.INFO):
+        queue.dispatch()
+        executor.finish(_abs(src, 'Zeta/z.mkv'))
+        queue.dispatch()
+    assert _rel(src, executor.started()) == ['Show A/E01.mkv', 'Zeta/z.mkv', 'Other/x.mkv']
+    assert caplog.text.count('more than PRIORITY_MAX_AGE_HOURS=24') == 1
+
+    # A rewrite with a fresh time brings the list back.
+    _write_dated(priority_file, ['Mid/'], '2026-01-11T00:00:00Z', bump=5)
+    executor.finish(_abs(src, 'Other/x.mkv'))
+    assert _rel(src, _run_all(queue, executor))[3:] == ['Mid/m.mkv', 'Show A/E02.mkv']
+
+
+def test_a_list_back_within_the_max_age_counts_again_without_changing(src, priority_file, clock, caplog):
+    """The age is re-checked at every pick in both directions, e.g. after the clock is corrected."""
+    _write_dated(priority_file, ['Show A/'], '2026-01-09T00:00:00Z')
+    queue, executor = _dated_queue(src, priority_file, max_age_hours=24)
+    queue.dispatch()
+    assert _rel(src, executor.started()) == ['Other/x.mkv']
+    clock['now'] = NOW - monitor.datetime.timedelta(hours=13)
+    executor.finish(_abs(src, 'Other/x.mkv'))
+    with caplog.at_level(logging.INFO):
+        assert _rel(src, _run_all(queue, executor)) == ['Other/x.mkv', 'Show A/E01.mkv', 'Show A/E02.mkv']
+    assert '1 entries, 2 of 2 pending files match' in caplog.text

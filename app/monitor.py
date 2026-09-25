@@ -12,11 +12,13 @@ import heapq
 import shutil
 import subprocess
 import threading
+import unicodedata
 import concurrent.futures
 from multiprocessing import Manager, freeze_support
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 import json
+import datetime
 
 # Env variables
 ENABLE_HW_ACCEL = os.getenv('ENABLE_HW_ACCEL', 'true').lower() == 'true'
@@ -432,6 +434,31 @@ DEST_MIN_FREE_BYTES = int(DEST_MIN_FREE_GB * 1000 ** 3)
 DEST_MIN_FREE_POLL_SECONDS = 300
 
 
+def _parse_priority_max_age_hours(value, default=0.0):
+    """Hours a priority list stays usable after its "generated" time; 0 turns the check off.
+
+    Anything unparseable, negative, NaN or infinite falls back to the default, for the same
+    reason as POLL_INTERVAL: a typo must never stop the encoder.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        logging.warning(f'Invalid PRIORITY_MAX_AGE_HOURS "{value}" - using {default:g}.')
+        return default
+    # Rejects negatives and NaN (every comparison is False) and inf.
+    if not 0 <= parsed < float('inf'):
+        logging.warning(
+            f'PRIORITY_MAX_AGE_HOURS must be 0 or a positive number of hours, got "{value}" - using {default:g}.')
+        return default
+    return parsed
+
+
+# When above zero, a priority list whose "generated" time is older than this many hours, or
+# that has no readable "generated" time, counts as absent: a producer that stopped must not
+# pin the queue to what people were watching weeks ago.
+PRIORITY_MAX_AGE_HOURS = _parse_priority_max_age_hours(os.getenv('PRIORITY_MAX_AGE_HOURS', '0'))
+
+
 # Everything FFmpeg accepts for -loglevel.  A level it does not know makes it exit before it
 # opens the input, so an unknown value must never reach the command line.
 FFMPEG_LOG_LEVELS = ('quiet', 'panic', 'fatal', 'error', 'warning', 'info', 'verbose', 'debug', 'trace')
@@ -471,7 +498,8 @@ logging.info(f'Config: SOURCE_FOLDER={SOURCE_FOLDER}, DEST_FOLDER={DEST_FOLDER},
              f'SKIP_IF_LOW_QUALITY_EXISTS={SKIP_IF_LOW_QUALITY_EXISTS}, '
              f'POLL_INTERVAL={POLL_INTERVAL:g}s, '
              f'FFMPEG_LOGLEVEL={FFMPEG_LOGLEVEL}, '
-             f'PRIORITY_FILE={PRIORITY_FILE}')
+             f'PRIORITY_FILE={PRIORITY_FILE}, '
+             f'PRIORITY_MAX_AGE_HOURS={PRIORITY_MAX_AGE_HOURS:g}')
 
 
 class VideoHandler(FileSystemEventHandler):
@@ -1216,32 +1244,86 @@ DISPATCH_RETRY_SECONDS = 60
 
 
 def _path_parts(path):
-    """A relative path as a tuple of components, whatever separator it was written with."""
+    """A relative path as a tuple of components, whatever separator it was written with.
+
+    Components are in Unicode NFC, so a name spelled with a precomposed 'é' matches the
+    same name spelled 'e' plus a combining accent, as macOS and some tools write it.
+    Nothing else is folded: case still has to match.
+    """
+    path = unicodedata.normalize('NFC', path)
     return tuple(p for p in path.replace(os.sep, '/').split('/') if p not in ('', '.'))
 
 
-def load_priority_entries(path):
-    """The entries of the priority list at path, highest priority first.
+def load_priority_list(path):
+    """(entries, generated) of the priority list at path: entries highest priority first,
+    generated the raw top-level "generated" value, or None when there is none.
 
-    [] when the file is missing, unreadable, invalid or lists nothing, which leaves the
-    queue in arrival order.  Only called when the file changed, so a broken file warns
-    once, not once per pick.
+    ([], None) when the file is missing, unreadable, invalid or lists nothing, which leaves
+    the queue in arrival order.  Only called when the file changed, so a broken file warns
+    once, not once per pick.  A leading UTF-8 byte order mark, as some Windows tools
+    write, is skipped.
     """
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding='utf-8-sig') as f:
             data = json.load(f)
     except FileNotFoundError:
-        return []
+        return [], None
     except Exception as e:
         # Anything, not just OSError and ValueError: nesting deeper than the parser's
         # recursion limit raises RecursionError, and the dispatcher must outlive any file.
         logging.warning(f'Priority list {path} is unreadable or not JSON ({type(e).__name__}: {e}); ignoring it')
-        return []
+        return [], None
     paths = data.get('paths') if isinstance(data, dict) else None
     if not isinstance(paths, list):
         logging.warning(f'Priority list {path} has no "paths" list; ignoring it')
-        return []
-    return [p for p in paths if isinstance(p, str)]
+        return [], None
+    return [p for p in paths if isinstance(p, str)], data.get('generated')
+
+
+def load_priority_entries(path):
+    """The entries of the priority list at path, highest priority first ([] as for load_priority_list)."""
+    return load_priority_list(path)[0]
+
+
+def _utcnow():
+    """The current time, timezone-aware.  A function so tests can move the clock."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+# fromisoformat alone is looser than ISO 8601: it takes any character between date and time.
+_GENERATED_FORM = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})')
+
+
+def parse_generated(value):
+    """A list's "generated" value as an aware datetime, or None unless it is an ISO 8601
+    extended time with 'Z' or a UTC offset.  A time without one is refused: its age would
+    depend on the time zone the encoder happens to run in."""
+    if not isinstance(value, str) or not _GENERATED_FORM.fullmatch(value.strip()):
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def priority_list_too_old(generated, max_age_hours, now):
+    """Why a list with this "generated" value must not be used at now, or None when it may.
+
+    Always None when max_age_hours is 0: the check is off and "generated" is not read.
+    """
+    if max_age_hours <= 0:
+        return None
+    if generated is None:
+        return f'has no "generated" time, which PRIORITY_MAX_AGE_HOURS={max_age_hours:g} needs'
+    when = parse_generated(generated)
+    if when is None:
+        return (f'has a "generated" time that is not ISO 8601 with Z or an offset ({generated!r:.80}), '
+                f'which PRIORITY_MAX_AGE_HOURS={max_age_hours:g} needs')
+    age_hours = (now - when).total_seconds() / 3600
+    if age_hours > max_age_hours:
+        return f'was generated {age_hours:.1f} h ago, more than PRIORITY_MAX_AGE_HOURS={max_age_hours:g}'
+    return None
 
 
 def priority_index(entries):
@@ -1293,14 +1375,17 @@ class EncodeQueue:
     At most max_workers files are in the executor at once, so a file waits here, where a
     changed priority list can still move it, rather than in the executor's own FIFO.
     The priority file is stat'ed before every pick and re-read when it changed; that
-    re-orders what is waiting and never touches what is running.
+    re-orders what is waiting and never touches what is running.  Its age is checked at
+    every pick too, since a list can pass PRIORITY_MAX_AGE_HOURS without changing.
     """
 
-    def __init__(self, executor, max_workers, processed_files, processing_files, priority_file=None):
+    def __init__(self, executor, max_workers, processed_files, processing_files, priority_file=None,
+                 max_age_hours=None):
         self._executor = executor
         self._max_workers = max_workers
         self._encode_args = (processed_files, processing_files)
         self._priority_file = priority_file or PRIORITY_FILE
+        self._max_age_hours = PRIORITY_MAX_AGE_HOURS if max_age_hours is None else max_age_hours
         self._cond = threading.Condition()
         self._pending = {}    # path -> arrival number
         self._heap = []       # (priority key, arrival number, path) for every pending path
@@ -1309,6 +1394,9 @@ class EncodeQueue:
         self._arrivals = 0
         self._index = {}
         self._signature = object()  # matches no real signature, so the first pick reads the file
+        self._entries = []
+        self._generated = None
+        self._too_old = False
 
     def add(self, path):
         """Queue path unless it is already waiting.  True when it was queued now.
@@ -1387,13 +1475,25 @@ class EncodeQueue:
 
     def _reload_priority(self):
         signature = _file_signature(self._priority_file)
-        if signature == self._signature:
+        changed = signature != self._signature
+        if changed:
+            self._signature = signature
+            self._entries, self._generated = load_priority_list(self._priority_file) if signature else ([], None)
+        too_old = None
+        if self._entries:
+            too_old = priority_list_too_old(self._generated, self._max_age_hours, _utcnow())
+        # Re-order and log only when the file or its usability changed, so an expired list
+        # warns once, not once per pick.
+        if not changed and bool(too_old) == self._too_old:
             return
-        self._signature = signature
-        entries = load_priority_entries(self._priority_file) if signature else []
+        self._too_old = bool(too_old)
+        entries = [] if too_old else self._entries
         self._index = priority_index(entries)
         self._heap = [self._heap_item(p, n) for p, n in self._pending.items()]
         heapq.heapify(self._heap)
+        if too_old:
+            logging.warning(f'Priority list {self._priority_file} {too_old}; encoding in arrival order')
+            return
         if not self._index:
             logging.info(f'No priority list in use ({self._priority_file}); encoding in arrival order')
             return
