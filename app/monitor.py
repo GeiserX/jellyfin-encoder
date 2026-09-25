@@ -1290,11 +1290,15 @@ def _utcnow():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
+# fromisoformat alone is looser than ISO 8601: it takes any character between date and time.
+_GENERATED_FORM = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})')
+
+
 def parse_generated(value):
     """A list's "generated" value as an aware datetime, or None unless it is an ISO 8601
-    time with 'Z' or a UTC offset.  A time without one is refused: its age would depend on
-    the time zone the encoder happens to run in."""
-    if not isinstance(value, str):
+    extended time with 'Z' or a UTC offset.  A time without one is refused: its age would
+    depend on the time zone the encoder happens to run in."""
+    if not isinstance(value, str) or not _GENERATED_FORM.fullmatch(value.strip()):
         return None
     try:
         parsed = datetime.datetime.fromisoformat(value.strip())

@@ -539,7 +539,8 @@ def test_parse_priority_max_age_hours_falls_back_to_off_and_warns(value, caplog)
     assert 'PRIORITY_MAX_AGE_HOURS' in caplog.text
 
 
-@pytest.mark.parametrize('generated', ['2026-01-10T00:00:00Z', '2026-01-10T02:00:00+02:00', '2026-01-09T13:00:00.5+00:00'])
+@pytest.mark.parametrize('generated', ['2026-01-10T00:00:00Z', '2026-01-10T02:00:00+02:00', '2026-01-09T13:00:00.5+00:00',
+                                       '2026-01-09T13:00:00.1234567Z'])
 def test_a_list_younger_than_the_max_age_is_used(src, priority_file, clock, generated):
     _write_dated(priority_file, ['Show A/'], generated)
     queue, executor = _dated_queue(src, priority_file, max_age_hours=24)
@@ -566,6 +567,8 @@ def test_the_utc_offset_counts_when_measuring_the_age(src, priority_file, clock)
     (..., 'has no "generated" time'),
     ('yesterday', 'is not ISO 8601'),
     ('2026-01-10T11:00:00', 'is not ISO 8601'),     # no Z or offset
+    ('2026-01-10x11:00:00Z', 'is not ISO 8601'),    # fromisoformat takes any separator
+    ('2026-01-10 11:00:00Z', 'is not ISO 8601'),
     (1767960000, 'is not ISO 8601'),
     (None, 'has no "generated" time'),
 ])

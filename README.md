@@ -240,8 +240,9 @@ encoder only reads it, so it can live on a read-only source mount.
   of state once, not on every pick.
 - `PRIORITY_MAX_AGE_HOURS` guards against a producer that stopped running. When it is above
   `0`, a list whose `generated` time is older than that many hours counts as absent, and so
-  does a list whose `generated` is missing or is not an ISO 8601 time with `Z` or a UTC
-  offset (`2026-01-01T00:00:00Z`, `2026-01-01T01:00:00+01:00`). The age is checked at every
+  does a list whose `generated` is missing or is not an ISO 8601 extended time, with a `T`
+  between date and time and a `Z` or UTC offset (`2026-01-01T00:00:00Z`,
+  `2026-01-01T01:00:00+01:00`). The age is checked at every
   pick, so a list expires without being touched, and it counts again once it is rewritten
   with a recent time. The log says why the list was set aside, once per change. A producer
   should rewrite the file at least once a day, and the setting should leave room for a
