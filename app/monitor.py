@@ -1225,10 +1225,11 @@ def load_priority_entries(path):
 
     [] when the file is missing, unreadable, invalid or lists nothing, which leaves the
     queue in arrival order.  Only called when the file changed, so a broken file warns
-    once, not once per pick.
+    once, not once per pick.  A leading UTF-8 byte order mark, as some Windows tools
+    write, is skipped.
     """
     try:
-        with open(path, encoding='utf-8') as f:
+        with open(path, encoding='utf-8-sig') as f:
             data = json.load(f)
     except FileNotFoundError:
         return []

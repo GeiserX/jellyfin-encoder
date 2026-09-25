@@ -219,6 +219,7 @@ encoder only reads it, so it can live on a read-only source mount.
 }
 ```
 
+- The file is UTF-8 JSON. A leading byte order mark, as some Windows tools write, is fine.
 - Each entry is a path relative to `SOURCE_FOLDER`: a folder (ends with `/`) or one file.
   The list is in priority order, highest first.
 - A queued file belongs to the first entry that is its own path or a folder holding it.

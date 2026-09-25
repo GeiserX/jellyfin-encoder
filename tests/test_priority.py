@@ -135,6 +135,15 @@ def test_empty_and_non_string_entries_match_nothing(priority_file):
     assert monitor.order_pending(['x.mkv', 'Show A/y.mkv'], entries) == ['Show A/y.mkv', 'x.mkv']
 
 
+def test_a_leading_utf8_byte_order_mark_is_skipped(src, priority_file):
+    body = json.dumps({'paths': ['Show A (2001)/']}).encode('utf-8')
+    priority_file.write_bytes(b'\xef\xbb\xbf' + body)
+    queue, executor = _queue(src, priority_file)
+    for rel in ['Other/x.mkv', 'Show A (2001)/S01/E01.mkv']:
+        queue.add(_abs(src, rel))
+    assert _rel(src, _run_all(queue, executor)) == ['Show A (2001)/S01/E01.mkv', 'Other/x.mkv']
+
+
 # ── a missing or broken file changes nothing ─────────────────────────────
 
 
