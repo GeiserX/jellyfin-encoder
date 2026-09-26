@@ -1,23 +1,25 @@
 <p align="center">
-  <img src="docs/images/banner.svg" alt="jellyfin-encoder banner" width="900"/>
+  <img src="docs/images/banner.svg" alt="quality-gate-encoder banner" width="900"/>
 </p>
 
 <p align="center">
-  <strong>Automatic video transcoding service for Jellyfin media streaming</strong>
+  <strong>The encoder of Quality Gate: automatic 720p versions of a Jellyfin library</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/GeiserX/jellyfin-encoder/blob/main/LICENSE"><img src="https://img.shields.io/github/license/GeiserX/jellyfin-encoder?style=flat-square" alt="License"></a>
-  <a href="https://hub.docker.com/r/drumsergio/jellyfin-encoder"><img src="https://img.shields.io/docker/pulls/drumsergio/jellyfin-encoder?style=flat-square" alt="Docker Pulls"></a>
-  <a href="https://github.com/GeiserX/jellyfin-encoder/releases"><img src="https://img.shields.io/github/v/release/GeiserX/jellyfin-encoder?style=flat-square" alt="GitHub Release"></a>
-  <a href="https://hub.docker.com/r/drumsergio/jellyfin-encoder"><img src="https://img.shields.io/docker/image-size/drumsergio/jellyfin-encoder/latest?style=flat-square&label=image%20size" alt="Docker Image Size"></a>
-  <a href="https://codecov.io/gh/GeiserX/jellyfin-encoder"><img src="https://codecov.io/gh/GeiserX/jellyfin-encoder/graph/badge.svg" alt="codecov"></a>
+  <a href="https://github.com/GeiserX/quality-gate-encoder/blob/main/LICENSE"><img src="https://img.shields.io/github/license/GeiserX/quality-gate-encoder?style=flat-square" alt="License"></a>
+  <a href="https://hub.docker.com/r/drumsergio/quality-gate-encoder"><img src="https://img.shields.io/docker/pulls/drumsergio/quality-gate-encoder?style=flat-square" alt="Docker Pulls"></a>
+  <a href="https://github.com/GeiserX/quality-gate-encoder/releases"><img src="https://img.shields.io/github/v/release/GeiserX/quality-gate-encoder?style=flat-square" alt="GitHub Release"></a>
+  <a href="https://hub.docker.com/r/drumsergio/quality-gate-encoder"><img src="https://img.shields.io/docker/image-size/drumsergio/quality-gate-encoder/latest?style=flat-square&label=image%20size" alt="Docker Image Size"></a>
+  <a href="https://codecov.io/gh/GeiserX/quality-gate-encoder"><img src="https://codecov.io/gh/GeiserX/quality-gate-encoder/graph/badge.svg" alt="codecov"></a>
   <a href="https://github.com/awesome-jellyfin/awesome-jellyfin#readme"><img src="https://img.shields.io/badge/listed%20on-awesome--jellyfin-00a4dc?style=flat-square&logo=jellyfin&logoColor=white" alt="listed on awesome-jellyfin"></a>
 </p>
 
 ---
 
-**jellyfin-encoder** monitors your media library and automatically transcodes videos to optimized 720p HEVC, H.264, or AV1 for bandwidth-efficient mobile and remote streaming. It runs as a Docker container, supports NVIDIA NVENC and Intel QSV hardware acceleration with automatic software fallback, and uses polling-based observation compatible with NFS, CIFS, and other network filesystems.
+**quality-gate-encoder** is the encoder of [Quality Gate](https://github.com/GeiserX/quality-gate), the Jellyfin plugin. It monitors your media library and automatically transcodes videos to optimized 720p HEVC, H.264, or AV1 for bandwidth-efficient mobile and remote streaming. It runs as a Docker container, supports NVIDIA NVENC and Intel QSV hardware acceleration with automatic software fallback, and uses polling-based observation compatible with NFS, CIFS, and other network filesystems.
+
+> **Formerly jellyfin-encoder.** The image moved to `drumsergio/quality-gate-encoder`. Every release is also published as `drumsergio/jellyfin-encoder` until 2027-03-31, and those images log a notice at startup; after that date the old name stays pullable but gets no new versions.
 
 ## Features
 
@@ -38,9 +40,9 @@
 
 ```yaml
 services:
-  jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.4.0
-    container_name: jellyfin-encoder
+  quality-gate-encoder:
+    image: drumsergio/quality-gate-encoder:1.5.6
+    container_name: quality-gate-encoder
     devices:
       - /dev/dri:/dev/dri  # Intel QSV -- remove if using NVIDIA or software encoding
     volumes:
@@ -66,7 +68,7 @@ services:
 
 ```bash
 docker run -d \
-  --name jellyfin-encoder \
+  --name quality-gate-encoder \
   --device /dev/dri:/dev/dri \
   -v /path/to/source:/app/source \
   -v /path/to/destination:/app/destination \
@@ -76,7 +78,7 @@ docker run -d \
   -e ENCODING_QUALITY=LOW \
   -e POLL_INTERVAL=60 \
   --restart always \
-  drumsergio/jellyfin-encoder:1.4.0
+  drumsergio/quality-gate-encoder:1.5.6
 ```
 
 ## Configuration
@@ -282,10 +284,10 @@ Starting with v1.1.0, encoded outputs always include the version suffix (e.g., `
 
 ```bash
 # Dry-run (shows what would be renamed)
-docker exec jellyfin-encoder python /app/scripts/migrate_encode_names.py
+docker exec quality-gate-encoder python /app/scripts/migrate_encode_names.py
 
 # Apply renames
-docker exec jellyfin-encoder python /app/scripts/migrate_encode_names.py --apply
+docker exec quality-gate-encoder python /app/scripts/migrate_encode_names.py --apply
 ```
 
 ### Upgrading to 1.4.0
@@ -312,8 +314,8 @@ Set `SYMLINK_MANIFEST_TARGET` to the path prefix as seen **inside the Jellyfin c
 
 ```yaml
 services:
-  jellyfin-encoder:
-    image: drumsergio/jellyfin-encoder:1.4.0
+  quality-gate-encoder:
+    image: drumsergio/quality-gate-encoder:1.5.6
     environment:
       SYMLINK_MANIFEST_TARGET: "/media-720/Peliculas"  # Jellyfin container path
       # ...other settings
@@ -421,7 +423,7 @@ A standalone diagnostic script that compares source and destination folders to r
 python scripts/compare_encodes.py --source /media/movies --dest /media/movies-720p
 
 # Inside a running container
-docker exec jellyfin-encoder python /app/scripts/compare_encodes.py
+docker exec quality-gate-encoder python /app/scripts/compare_encodes.py
 
 # Output as JSON or CSV
 python scripts/compare_encodes.py -s /media/movies -d /media/movies-720p --format json
@@ -476,7 +478,7 @@ STATUS: Issues found - 23 missing encodes, 20 orphaned files
 
 ## Other Jellyfin Projects by GeiserX
 
-- [quality-gate](https://github.com/GeiserX/quality-gate) — Restrict users to specific media versions based on filename regex patterns
+- [quality-gate](https://github.com/GeiserX/quality-gate) — Restrict users to specific media versions based on filename regex patterns; this encoder builds the 720p versions it serves
 - [smart-covers](https://github.com/GeiserX/smart-covers) — Cover extraction for books, audiobooks, comics, magazines, and music libraries with online fallback
 - [whisper-subs](https://github.com/GeiserX/whisper-subs) — Automatically generates subtitles using local AI models powered by Whisper
 - [jellyfin-telegram-channel-sync](https://github.com/GeiserX/jellyfin-telegram-channel-sync) — Sync Jellyfin access with Telegram channel membership

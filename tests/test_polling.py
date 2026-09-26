@@ -261,3 +261,15 @@ def test_a_renamed_folder_submits_every_video_inside_it(tree):
         finally:
             observer.stop()
             observer.join(timeout=10)
+
+
+def test_start_monitoring_logs_the_move_notice_on_an_old_name_image(tree, monkeypatch, caplog):
+    monkeypatch.setattr(monitor, 'POLL_INTERVAL', 0.2)
+    monkeypatch.setenv('IMAGE_MOVED_TO', 'drumsergio/quality-gate-encoder')
+    with caplog.at_level(logging.WARNING):
+        observer = monitor.start_monitoring()
+    try:
+        assert 'Switch your image to drumsergio/quality-gate-encoder.' in caplog.text
+    finally:
+        observer.stop()
+        observer.join(timeout=10)

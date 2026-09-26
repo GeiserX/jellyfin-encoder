@@ -1750,8 +1750,17 @@ def create_observer(handler):
     return observer
 
 
+def warn_if_image_moved():
+    """Old-name images carry IMAGE_MOVED_TO; the new-name image has it empty, so this logs nothing."""
+    moved_to = os.getenv('IMAGE_MOVED_TO', '').strip()
+    if moved_to:
+        logging.warning(f'drumsergio/jellyfin-encoder is deprecated and gets releases only until 2027-03-31. '
+                        f'Switch your image to {moved_to}.')
+
+
 def start_monitoring():
     """Wire VideoHandler to the polling observer and start watching."""
+    warn_if_image_moved()
     observer = create_observer(VideoHandler())
     observer.start()
     logging.info(f'Monitoring started (polling every {POLL_INTERVAL:g}s).')

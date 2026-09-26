@@ -34,3 +34,7 @@ RUN mkdir -p /app/source /app/destination
 
 # Set the entrypoint to activate the virtual environment and run the script
 ENTRYPOINT ["/bin/bash", "-c", "source /app/venv/bin/activate && exec python monitor.py"]
+
+# Set only on images published under the old name; monitor.py logs a "this image moved" notice
+ARG IMAGE_MOVED_TO=""
+ENV IMAGE_MOVED_TO=${IMAGE_MOVED_TO}

@@ -1,4 +1,4 @@
-# CLAUDE.md — Jellyfin Encoder
+# CLAUDE.md — Quality Gate Encoder (formerly jellyfin-encoder)
 
 ## Overview
 Automatic video transcoding service for Jellyfin that monitors media libraries and transcodes to optimized 720p HEVC, H.264, or AV1 with NVIDIA NVENC and Intel QSV hardware acceleration.
@@ -6,7 +6,7 @@ Automatic video transcoding service for Jellyfin that monitors media libraries a
 ## Tech Stack
 - Python
 - FFmpeg (HEVC/H.264/AV1 encoding via NVENC, QSV, or software fallback)
-- Docker (drumsergio/jellyfin-encoder)
+- Docker (drumsergio/quality-gate-encoder; every release also goes to the old name drumsergio/jellyfin-encoder until 2027-03-31)
 - Pytest (testing)
 - GitHub Actions CI
 
@@ -33,7 +33,7 @@ docker compose up
 
 ## Key Rules
 - Never hardcode media paths; use environment variables and volume mounts
-- Docker images use semver tags on Docker Hub (drumsergio/jellyfin-encoder)
+- Docker images use semver tags on Docker Hub (drumsergio/quality-gate-encoder)
 - Always support hardware acceleration fallback to software encoding (libx265/libx264/libsvtav1)
 - Temp-file workflow (`.tmp` extension) with atomic rename to prevent indexing incomplete files
 - Mount-health checks must pass before any cleanup/deletion operations

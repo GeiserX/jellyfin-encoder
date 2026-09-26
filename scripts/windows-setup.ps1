@@ -1,5 +1,5 @@
 # windows-setup.ps1
-# Setup script for running jellyfin-encoder natively on Windows 11 with NVIDIA GPU.
+# Setup script for running quality-gate-encoder natively on Windows 11 with NVIDIA GPU.
 # Run as Administrator: powershell -ExecutionPolicy Bypass -File windows-setup.ps1
 
 #Requires -RunAsAdministrator
