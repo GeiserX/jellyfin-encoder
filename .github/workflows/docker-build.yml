@@ -94,7 +94,17 @@ jobs:
           cache-to: type=gha,mode=max
 
       # Every release also goes to the old name until 2027-03-31; those images log a "this image moved" notice.
+      - name: Check the old-name cutoff
+        id: old_name
+        run: |
+          if [[ "$(date -u +%F)" < "2027-04-01" ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push Docker image under the old name
+        if: steps.old_name.outputs.publish == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
